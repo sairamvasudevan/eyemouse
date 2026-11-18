@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.eyemouse.EyeMouse</string>
+    <key>CFBundleName</key>
+    <string>EyeMouse</string>
+    <key>CFBundleDisplayName</key>
+    <string>EyeMouse</string>
+    <key>CFBundleExecutable</key>
+    <string>EyeMouse</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.3.0</string>
+    <key>CFBundleVersion</key>
+    <string>3</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSCameraUsageDescription</key>
+    <string>EyeMouse uses your camera locally to track eye gaze and head orientation. Video frames are processed in real-time in memory and are never recorded, saved, or uploaded.</string>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+</dict>
+</plist>
+
