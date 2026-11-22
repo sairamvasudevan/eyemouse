@@ -93,52 +93,74 @@ def get_pipeline() -> VisionPipeline:
     return pipeline
 
 
+def is_target_in_free_area(x: float, y: float) -> bool:
+    """Ensure target dot is strictly positioned in the free, unobstructed display area.
+    
+    Exclusion zones:
+    1. Top Header: y < 0.12
+    2. Bottom Banner & Controls: y > 0.85
+    3. Outer Screen Margins: x < 0.08 or x > 0.92
+    4. Top-Left Diagnostics HUD Box: x < 0.25 and y < 0.42 (The user's reported obstruction)
+    5. Bottom-Right Webcam PIP Box: x > 0.78 and y > 0.74
+    """
+    if y < 0.12 or y > 0.85:
+        return False
+    if x < 0.08 or x > 0.92:
+        return False
+    if x < 0.25 and y < 0.42:
+        return False
+    if x > 0.78 and y > 0.74:
+        return False
+    return True
+
+
 def generate_standard_100_targets() -> List[Dict[str, Any]]:
-    """Generate standardized, reproducible curriculum of 100 calibration points."""
-    targets = []
-    # 1. Primary 9 Anchor Points
+    """Generate standardized, reproducible curriculum of 100 calibration points strictly in the free area."""
+    targets: List[Dict[str, Any]] = []
+
+    # 1. Primary Anchor Points (strictly placed in free area)
     anchors = [
         ("Center", 0.50, 0.50),
-        ("Top-Left", 0.12, 0.12),
-        ("Top-Center", 0.50, 0.12),
-        ("Top-Right", 0.88, 0.12),
+        ("Top-Left-Free", 0.28, 0.14),       # Safely to the right of the HUD
+        ("Mid-Left-Free", 0.10, 0.46),       # Safely below the HUD
+        ("Top-Center", 0.50, 0.14),
+        ("Top-Right", 0.88, 0.14),
         ("Right-Center", 0.88, 0.50),
-        ("Bottom-Right", 0.88, 0.88),
-        ("Bottom-Center", 0.50, 0.88),
-        ("Bottom-Left", 0.12, 0.88),
-        ("Left-Center", 0.12, 0.50),
+        ("Bottom-Right-Free", 0.76, 0.72),  # Safely above/left of PIP
+        ("Bottom-Center", 0.50, 0.82),
+        ("Bottom-Left", 0.10, 0.82),
     ]
     for name, x, y in anchors:
-        targets.append({"name": name, "x": round(x, 4), "y": round(y, 4)})
+        if is_target_in_free_area(x, y):
+            targets.append({"name": name, "x": round(x, 4), "y": round(y, 4)})
 
-    # 2. 16 Quadrant Grid Points (4x4 inner matrix)
-    for row in [0.25, 0.40, 0.60, 0.75]:
-        for col in [0.25, 0.40, 0.60, 0.75]:
+    # 2. Quadrant and Multi-Regional Grid Points
+    grid_rows = [0.16, 0.26, 0.36, 0.46, 0.56, 0.66, 0.76, 0.82]
+    grid_cols = [0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90]
+
+    existing_coords = {(p["x"], p["y"]) for p in targets}
+    for r in grid_rows:
+        for c in grid_cols:
+            if is_target_in_free_area(c, r) and (c, r) not in existing_coords:
+                targets.append({
+                    "name": f"Grid-({int(c*100)},{int(r*100)})",
+                    "x": round(c, 4),
+                    "y": round(r, 4),
+                })
+                existing_coords.add((c, r))
+
+    # 3. Remaining Points: Deterministic pseudo-random distribution strictly in free area
+    rng = random.Random(42)  # Fixed seed guarantees identical sequence for all users
+    while len(targets) < 100:
+        rx = round(0.08 + rng.random() * 0.84, 4)
+        ry = round(0.12 + rng.random() * 0.72, 4)
+        if is_target_in_free_area(rx, ry) and (rx, ry) not in existing_coords:
             targets.append({
-                "name": f"Grid-({int(col*100)},{int(row*100)})",
-                "x": round(col, 4),
-                "y": round(row, 4)
+                "name": f"Curriculum-{len(targets) + 1}",
+                "x": rx,
+                "y": ry,
             })
-
-    # 3. 25 Subgrid Points (5x5 matrix across full display span)
-    for row in [0.18, 0.34, 0.50, 0.66, 0.82]:
-        for col in [0.18, 0.34, 0.50, 0.66, 0.82]:
-            targets.append({
-                "name": f"SubGrid-({int(col*100)},{int(row*100)})",
-                "x": round(col, 4),
-                "y": round(row, 4)
-            })
-
-    # 4. Remaining 50 Points: Deterministic pseudo-random distribution
-    rng = random.Random(42)  # Fixed seed guarantees identical targets across all users
-    for i in range(50):
-        rx = 0.08 + rng.random() * 0.84
-        ry = 0.08 + rng.random() * 0.84
-        targets.append({
-            "name": f"Curriculum-{51 + i}",
-            "x": round(rx, 4),
-            "y": round(ry, 4)
-        })
+            existing_coords.add((rx, ry))
 
     return targets[:100]
 
@@ -325,7 +347,7 @@ INDEX_HTML = """<!DOCTYPE html>
       transform: translateX(-50%);
     }
 
-    /* Target Dot for 100-Point Training Ground */
+    /* Target Dot for 100-Point Training Ground (Always on top of all UI) */
     #calib-target {
       position: absolute;
       width: 60px;
@@ -335,7 +357,7 @@ INDEX_HTML = """<!DOCTYPE html>
       display: flex;
       align-items: center;
       justify-content: center;
-      z-index: 30;
+      z-index: 80;
       cursor: pointer;
       transition: left 0.35s cubic-bezier(0.16, 1, 0.3, 1), top 0.35s cubic-bezier(0.16, 1, 0.3, 1);
     }
@@ -544,10 +566,39 @@ INDEX_HTML = """<!DOCTYPE html>
       font-size: 11px;
       line-height: 1.6;
       font-family: monospace;
-      z-index: 50;
+      z-index: 45;
       backdrop-filter: blur(12px);
       box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
       min-width: 250px;
+      transition: opacity 0.25s ease, transform 0.2s ease, max-height 0.25s ease;
+    }
+    #hud.hud-ghost {
+      opacity: 0.12 !important;
+      pointer-events: none !important;
+      filter: blur(1px);
+    }
+    #hud.hud-minimized {
+      min-width: auto;
+      width: auto;
+      padding: 6px 12px;
+      background: rgba(18, 25, 43, 0.7);
+    }
+    #hud.hud-minimized .hud-content {
+      display: none;
+    }
+    .hud-toggle-btn {
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid var(--border);
+      color: var(--text-dim);
+      padding: 2px 7px;
+      border-radius: 4px;
+      font-size: 10px;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .hud-toggle-btn:hover {
+      color: #fff;
+      background: rgba(255, 255, 255, 0.2);
     }
     .hud-title {
       font-weight: 700;
@@ -753,6 +804,9 @@ INDEX_HTML = """<!DOCTYPE html>
     </div>
 
     <div style="display: flex; gap: 8px; align-items: center;">
+      <!-- Toggle Telemetry HUD -->
+      <button id="btn-toggle-hud" class="btn" onclick="toggleHud()" title="Show/Hide Telemetry HUD (Hotkey: H)">👁 HUD: Visible</button>
+
       <!-- Direct Link to Live Monitoring Dashboard -->
       <a href="/dashboard" class="dashboard-pill" title="Open Multi-System Monitoring Dashboard">
         <span>📊 Live Dashboard</span>
@@ -768,23 +822,28 @@ INDEX_HTML = """<!DOCTYPE html>
     </div>
   </header>
 
-  <!-- Diagnostics Telemetry HUD -->
+  <!-- Diagnostics Telemetry HUD (Collapsible & Auto-Ghosting) -->
   <div id="hud">
     <div class="hud-title">
-      <span>Diagnostics Telemetry</span>
-      <span id="hud-mode-tag" style="color: var(--accent-green); font-size: 10px;">100-PT CURRICULUM</span>
+      <div style="display: flex; align-items: center; gap: 6px;">
+        <span>Diagnostics Telemetry</span>
+        <span id="hud-mode-tag" style="color: var(--accent-green); font-size: 10px;">100-PT</span>
+      </div>
+      <button id="hud-min-btn" class="hud-toggle-btn" onclick="toggleHud(event)">— Minimize</button>
     </div>
-    <div>Tracking: <span id="hud-face" class="hud-val">Detecting...</span></div>
-    <div>Inference: <span id="hud-latency" class="hud-val">0.0 ms</span></div>
-    <div>FPS: <span id="hud-fps" class="hud-val">0</span></div>
-    <div>Gaze (u, v): <span id="hud-gaze" class="hud-val">0.50, 0.50</span></div>
-    <div>Screen (px): <span id="hud-px" class="hud-val">0, 0</span></div>
-    <div>Iris UV: <span id="hud-iris" class="hud-val">L: 0.50, 0.00 | R: 0.50, 0.00</span></div>
-    <div>Head Pose: <span id="hud-pose" class="hud-val">0°, 0°, 0°</span></div>
-    <div>Target Dist: <span id="hud-dist" class="hud-val">0 px</span></div>
-    <div>Your Progress: <span id="hud-user-pts" class="hud-val">0 / 100</span></div>
-    <div>Global Dataset: <span id="hud-dataset-pts" class="hud-val">0 samples</span></div>
-    <div>Active Systems: <span id="hud-systems-online" class="hud-val">1 online</span></div>
+    <div id="hud-content" class="hud-content">
+      <div>Tracking: <span id="hud-face" class="hud-val">Detecting...</span></div>
+      <div>Inference: <span id="hud-latency" class="hud-val">0.0 ms</span></div>
+      <div>FPS: <span id="hud-fps" class="hud-val">0</span></div>
+      <div>Gaze (u, v): <span id="hud-gaze" class="hud-val">0.50, 0.50</span></div>
+      <div>Screen (px): <span id="hud-px" class="hud-val">0, 0</span></div>
+      <div>Iris UV: <span id="hud-iris" class="hud-val">L: 0.50, 0.00 | R: 0.50, 0.00</span></div>
+      <div>Head Pose: <span id="hud-pose" class="hud-val">0°, 0°, 0°</span></div>
+      <div>Target Dist: <span id="hud-dist" class="hud-val">0 px</span></div>
+      <div>Your Progress: <span id="hud-user-pts" class="hud-val">0 / 100</span></div>
+      <div>Global Dataset: <span id="hud-dataset-pts" class="hud-val">0 samples</span></div>
+      <div>Active Systems: <span id="hud-systems-online" class="hud-val">1 online</span></div>
+    </div>
   </div>
 
   <!-- Instruction Banner -->
@@ -928,6 +987,16 @@ INDEX_HTML = """<!DOCTYPE html>
       targetEl.dataset.targetX = t.x;
       targetEl.dataset.targetY = t.y;
       targetEl.dataset.targetName = t.name;
+
+      // Auto-ghost HUD if target dot is near the top-left area so it NEVER obstructs view
+      const hudEl = document.getElementById("hud");
+      if (hudEl) {
+        if (t.x < 0.36 && t.y < 0.48) {
+          hudEl.classList.add("hud-ghost");
+        } else {
+          hudEl.classList.remove("hud-ghost");
+        }
+      }
 
       document.getElementById("banner-text").innerHTML =
         `Point <b>${idx + 1} of 100</b> (${t.name}): Look at the yellow dot and press <span class="kbd-key">SPACEBAR</span>.`;
@@ -1133,13 +1202,33 @@ INDEX_HTML = """<!DOCTYPE html>
       }, 350);
     }
 
-    // Spacebar capture
+    // Spacebar capture & H key to toggle HUD
     window.addEventListener("keydown", (e) => {
       if (e.code === "Space" && e.target.tagName !== "INPUT") {
         e.preventDefault();
         capturePoint();
+      } else if ((e.key === "h" || e.key === "H") && e.target.tagName !== "INPUT") {
+        toggleHud();
       }
     });
+
+    let isHudMinimized = false;
+    function toggleHud(e) {
+      if (e) e.stopPropagation();
+      isHudMinimized = !isHudMinimized;
+      const hud = document.getElementById("hud");
+      const minBtn = document.getElementById("hud-min-btn");
+      const topBtn = document.getElementById("btn-toggle-hud");
+      if (isHudMinimized) {
+        hud.classList.add("hud-minimized");
+        if (minBtn) minBtn.innerText = "+ Expand";
+        if (topBtn) topBtn.innerText = "👁 HUD: Hidden";
+      } else {
+        hud.classList.remove("hud-minimized");
+        if (minBtn) minBtn.innerText = "— Minimize";
+        if (topBtn) topBtn.innerText = "👁 HUD: Visible";
+      }
+    }
 
     // Client Heartbeat: Sends live progress & system status every 3 seconds
     async function sendHeartbeat() {
