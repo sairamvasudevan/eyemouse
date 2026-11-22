@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""EyeMouse Web Server: Interactive Localhost Gaze Tracking & Calibration.
+"""EyeMouse Web Server: Interactive Localhost Gaze Tracking, Calibration & Accuracy Validation.
 
-Runs a lightweight HTTP server on an available localhost port.
+Runs an HTTP server on localhost (port 8080 or available).
 Provides:
-1. Live camera capture and MediaPipe facial landmark & iris tracking.
-2. Self-learning Bayesian Adaptive Gaze Model.
+1. Live camera capture & MediaPipe facial landmark + iris tracking.
+2. Self-learning Bayesian Adaptive Gaze Model (RLS online updates).
 3. Interactive keypress calibration (Look at dot -> Press SPACEBAR to capture).
-4. Real-time gaze prediction reticle and diagnostics HUD.
+4. Accuracy Validation Test mode: Held-out targets measuring exact pixel & angular error.
+5. Interactive Gaze Playground: Look-to-pop target bubbles to test actual eye control.
+6. Calibrated Profile Inspector: View/download active_profile.json.
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ import time
 from http import HTTPStatus
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 import cv2
 import numpy as np
@@ -33,8 +35,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.vision_engine.pipeline import VisionPipeline
 from src.vision_engine.types import PixelFormat, VisionOutput
-from src.vision_engine.calibration.adaptive_model import AdaptiveGazeModel
-from src.vision_engine.calibration.estimator import CalibratedGazeEstimator
+from src.vision_engine.calibration.profile import DEFAULT_PROFILE_DIR, DEFAULT_PROFILE_NAME
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("EyeMouseWeb")
@@ -49,6 +50,11 @@ def get_pipeline() -> VisionPipeline:
     if pipeline is None:
         log.info("Initializing VisionPipeline with AdaptiveGazeModel...")
         pipeline = VisionPipeline(use_calibrated_model=True)
+        try:
+            profile_path = pipeline.save_active_profile()
+            log.info("Active profile initialized at %s", profile_path)
+        except Exception as exc:
+            log.warning("Could not pre-save profile: %s", exc)
     return pipeline
 
 
@@ -70,14 +76,15 @@ INDEX_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>EyeMouse - Self-Learning Gaze Tracker</title>
+  <title>EyeMouse - Self-Learning Gaze Tracker & Accuracy Validator</title>
   <style>
     :root {
       --bg: #0b0f19;
-      --card-bg: rgba(20, 28, 47, 0.85);
+      --card-bg: rgba(20, 28, 47, 0.88);
       --accent-cyan: #00f0ff;
       --accent-green: #00ff88;
       --accent-orange: #ffaa00;
+      --accent-red: #ff4466;
       --text: #f0f6fc;
       --text-dim: #8b949e;
       --border: rgba(255, 255, 255, 0.12);
@@ -93,7 +100,7 @@ INDEX_HTML = """<!DOCTYPE html>
       position: relative;
     }
     
-    /* Fullscreen Target & Gaze Layer */
+    /* Fullscreen Drawing Canvas */
     #canvas-layer {
       position: absolute;
       top: 0;
@@ -107,17 +114,17 @@ INDEX_HTML = """<!DOCTYPE html>
     /* Live Gaze Reticle */
     #gaze-cursor {
       position: absolute;
-      width: 32px;
-      height: 32px;
-      margin-left: -16px;
-      margin-top: -16px;
+      width: 34px;
+      height: 34px;
+      margin-left: -17px;
+      margin-top: -17px;
       border: 2px solid var(--accent-cyan);
       border-radius: 50%;
-      background: rgba(0, 240, 255, 0.2);
-      box-shadow: 0 0 15px var(--accent-cyan);
+      background: rgba(0, 240, 255, 0.25);
+      box-shadow: 0 0 16px var(--accent-cyan);
       pointer-events: none;
-      transition: transform 0.05s linear, opacity 0.2s ease;
-      z-index: 20;
+      transition: transform 0.04s linear, opacity 0.2s ease;
+      z-index: 25;
       display: none;
     }
     #gaze-cursor::after {
@@ -133,13 +140,13 @@ INDEX_HTML = """<!DOCTYPE html>
       background: #fff;
     }
 
-    /* Calibration Target Dot */
+    /* Calibration / Validation Target Dot */
     #calib-target {
       position: absolute;
-      width: 48px;
-      height: 48px;
-      margin-left: -24px;
-      margin-top: -24px;
+      width: 52px;
+      height: 52px;
+      margin-left: -26px;
+      margin-top: -26px;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -149,8 +156,8 @@ INDEX_HTML = """<!DOCTYPE html>
     }
     .target-ring {
       position: absolute;
-      width: 44px;
-      height: 44px;
+      width: 48px;
+      height: 48px;
       border: 3px solid var(--accent-cyan);
       border-radius: 50%;
       animation: pulse-ring 1.8s infinite ease-out;
@@ -177,14 +184,14 @@ INDEX_HTML = """<!DOCTYPE html>
     }
     .target-cross-h {
       position: absolute;
-      width: 32px;
+      width: 36px;
       height: 2px;
       background: rgba(0, 240, 255, 0.4);
     }
     .target-cross-v {
       position: absolute;
       width: 2px;
-      height: 32px;
+      height: 36px;
       background: rgba(0, 240, 255, 0.4);
     }
     
@@ -193,7 +200,6 @@ INDEX_HTML = """<!DOCTYPE html>
       100% { transform: scale(1.6); opacity: 0; }
     }
     
-    /* Captured Confirmation Flash */
     .confirmed-pulse {
       animation: confirm-flash 0.35s ease-out !important;
     }
@@ -214,7 +220,7 @@ INDEX_HTML = """<!DOCTYPE html>
       justify-content: space-between;
       align-items: center;
       z-index: 50;
-      background: linear-gradient(180deg, rgba(11, 15, 25, 0.9) 0%, rgba(11, 15, 25, 0) 100%);
+      background: linear-gradient(180deg, rgba(11, 15, 25, 0.95) 0%, rgba(11, 15, 25, 0) 100%);
     }
     .brand {
       display: flex;
@@ -222,8 +228,8 @@ INDEX_HTML = """<!DOCTYPE html>
       gap: 12px;
     }
     .brand-icon {
-      width: 28px;
-      height: 28px;
+      width: 30px;
+      height: 30px;
       background: var(--accent-cyan);
       border-radius: 8px;
       display: flex;
@@ -231,7 +237,7 @@ INDEX_HTML = """<!DOCTYPE html>
       justify-content: center;
       color: #000;
       font-weight: 900;
-      font-size: 14px;
+      font-size: 15px;
     }
     .brand-title {
       font-size: 18px;
@@ -242,7 +248,7 @@ INDEX_HTML = """<!DOCTYPE html>
       font-size: 11px;
       color: var(--accent-cyan);
       background: rgba(0, 240, 255, 0.12);
-      padding: 2px 8px;
+      padding: 3px 8px;
       border-radius: 12px;
       font-weight: 600;
       border: 1px solid rgba(0, 240, 255, 0.3);
@@ -264,6 +270,7 @@ INDEX_HTML = """<!DOCTYPE html>
       gap: 14px;
       z-index: 50;
       box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+      font-size: 14px;
     }
     .kbd-key {
       background: #21262d;
@@ -286,12 +293,15 @@ INDEX_HTML = """<!DOCTYPE html>
       display: flex;
       gap: 10px;
       z-index: 50;
+      flex-wrap: wrap;
+      justify-content: center;
+      max-width: 90vw;
     }
     .btn {
       background: var(--card-bg);
       border: 1px solid var(--border);
       color: var(--text);
-      padding: 9px 18px;
+      padding: 9px 16px;
       border-radius: 8px;
       font-size: 13px;
       font-weight: 600;
@@ -300,10 +310,11 @@ INDEX_HTML = """<!DOCTYPE html>
       align-items: center;
       gap: 8px;
       transition: all 0.15s ease;
+      backdrop-filter: blur(8px);
     }
     .btn:hover {
-      background: rgba(255, 255, 255, 0.1);
-      border-color: rgba(255, 255, 255, 0.25);
+      background: rgba(255, 255, 255, 0.12);
+      border-color: rgba(255, 255, 255, 0.3);
     }
     .btn-primary {
       background: var(--accent-cyan);
@@ -312,6 +323,14 @@ INDEX_HTML = """<!DOCTYPE html>
     }
     .btn-primary:hover {
       background: #33f3ff;
+    }
+    .btn-green {
+      background: rgba(0, 255, 136, 0.15);
+      color: var(--accent-green);
+      border-color: var(--accent-green);
+    }
+    .btn-green:hover {
+      background: rgba(0, 255, 136, 0.28);
     }
     
     /* PIP Video Panel */
@@ -340,7 +359,7 @@ INDEX_HTML = """<!DOCTYPE html>
       left: 8px;
       font-size: 10px;
       font-weight: 700;
-      background: rgba(0, 0, 0, 0.6);
+      background: rgba(0, 0, 0, 0.65);
       padding: 3px 6px;
       border-radius: 4px;
       color: var(--accent-green);
@@ -355,7 +374,7 @@ INDEX_HTML = """<!DOCTYPE html>
       background: var(--accent-green);
     }
 
-    /* Diagnostics HUD (Top Left) */
+    /* Diagnostics HUD */
     #hud {
       position: absolute;
       top: 75px;
@@ -370,7 +389,7 @@ INDEX_HTML = """<!DOCTYPE html>
       line-height: 1.6;
       color: var(--text-dim);
       z-index: 50;
-      min-width: 220px;
+      min-width: 230px;
     }
     .hud-title {
       font-size: 11px;
@@ -379,22 +398,136 @@ INDEX_HTML = """<!DOCTYPE html>
       letter-spacing: 0.5px;
       color: #fff;
       margin-bottom: 6px;
+      display: flex;
+      justify-content: space-between;
     }
     .hud-val {
       color: var(--accent-cyan);
       font-weight: bold;
     }
+
+    /* Modals (Profile Inspector, Scorecard) */
+    .modal-overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      background: rgba(0, 0, 0, 0.75);
+      backdrop-filter: blur(8px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+    }
+    .modal-box {
+      background: #141c2f;
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 28px;
+      max-width: 650px;
+      width: 90%;
+      max-height: 85vh;
+      overflow-y: auto;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.8);
+    }
+    .modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 18px;
+    }
+    .modal-title {
+      font-size: 20px;
+      font-weight: bold;
+      color: #fff;
+    }
+    .close-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-dim);
+      font-size: 20px;
+      cursor: pointer;
+    }
+    pre.code-block {
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 14px;
+      font-size: 12px;
+      color: #c9d1d9;
+      overflow-x: auto;
+      max-height: 380px;
+      font-family: monospace;
+    }
+
+    /* Scorecard Table */
+    table.metrics-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 16px 0;
+      font-size: 13px;
+    }
+    table.metrics-table th, table.metrics-table td {
+      padding: 8px 12px;
+      text-align: left;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    table.metrics-table th {
+      color: var(--text-dim);
+      font-size: 11px;
+      text-transform: uppercase;
+    }
+
+    /* Gaze Target Bubble in Playground Mode */
+    .playground-bubble {
+      position: absolute;
+      width: 70px;
+      height: 70px;
+      margin-left: -35px;
+      margin-top: -35px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(0,240,255,0.4) 0%, rgba(0,240,255,0.1) 70%);
+      border: 2px solid var(--accent-cyan);
+      box-shadow: 0 0 20px rgba(0,240,255,0.3);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 35;
+      font-size: 11px;
+      font-weight: bold;
+      color: #fff;
+      transition: transform 0.15s ease, background 0.15s ease;
+      cursor: pointer;
+    }
+    .playground-bubble.dwell-active {
+      background: radial-gradient(circle, rgba(0,255,136,0.6) 0%, rgba(0,255,136,0.2) 70%);
+      border-color: var(--accent-green);
+      transform: scale(1.15);
+      box-shadow: 0 0 25px var(--accent-green);
+    }
+    .dwell-ring {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      border-radius: 50%;
+      border: 3px solid transparent;
+      border-top-color: var(--accent-green);
+      animation: spin 0.4s linear infinite;
+      display: none;
+    }
   </style>
 </head>
 <body>
 
-  <!-- Fullscreen Drawing Canvas -->
+  <!-- Fullscreen Drawing Canvas for Error Vectors & Heatmap -->
   <canvas id="canvas-layer"></canvas>
 
   <!-- Live Predicted Gaze Reticle -->
   <div id="gaze-cursor"></div>
 
-  <!-- Calibration Target -->
+  <!-- Calibration / Validation Target -->
   <div id="calib-target" style="left: 50%; top: 50%;">
     <div class="target-cross-h"></div>
     <div class="target-cross-v"></div>
@@ -411,21 +544,25 @@ INDEX_HTML = """<!DOCTYPE html>
         <span class="brand-tag">Online Learning Model</span>
       </div>
     </div>
-    <div style="display: flex; gap: 12px; align-items: center;">
+    <div style="display: flex; gap: 10px; align-items: center;">
       <span id="calib-counter" style="font-size: 13px; font-weight: 600; color: var(--accent-cyan);">Target 1 of 5</span>
+      <button class="btn" onclick="openProfileModal()">📄 View Profile JSON</button>
       <button class="btn" onclick="toggleFullscreen()">⛶ Fullscreen</button>
     </div>
   </header>
 
   <!-- Diagnostics HUD -->
   <div id="hud">
-    <div class="hud-title">Diagnostics Telemetry</div>
+    <div class="hud-title">
+      <span>Diagnostics Telemetry</span>
+      <span id="hud-mode-tag" style="color: var(--accent-green); font-size: 10px;">LIVE</span>
+    </div>
     <div>Tracking: <span id="hud-face" class="hud-val">Detecting...</span></div>
-    <div>Latency: <span id="hud-latency" class="hud-val">0.0 ms</span></div>
+    <div>Inference: <span id="hud-latency" class="hud-val">0.0 ms</span></div>
     <div>FPS: <span id="hud-fps" class="hud-val">0</span></div>
     <div>Gaze (u, v): <span id="hud-gaze" class="hud-val">0.50, 0.50</span></div>
+    <div>Screen (px): <span id="hud-px" class="hud-val">0, 0</span></div>
     <div>Head Pose: <span id="hud-pose" class="hud-val">0°, 0°, 0°</span></div>
-    <div>Model: <span id="hud-model" class="hud-val">Adaptive Online</span></div>
     <div>Adapted: <span id="hud-adapted" class="hud-val">0 pts</span></div>
   </div>
 
@@ -439,9 +576,11 @@ INDEX_HTML = """<!DOCTYPE html>
   <!-- Bottom Control Toolbar -->
   <div id="controls">
     <button class="btn btn-primary" onclick="capturePoint()">Capture Target (Space)</button>
-    <button class="btn" onclick="startQuickOnePoint()">1-Point Center</button>
-    <button class="btn" onclick="startFivePoint()">5-Point Calibration</button>
-    <button class="btn" onclick="startNinePoint()">9-Point Grid</button>
+    <button class="btn" onclick="startQuickOnePoint()">1-Pt Center Calib</button>
+    <button class="btn" onclick="startFivePoint()">5-Pt Adaptive Calib</button>
+    <button class="btn" onclick="startNinePoint()">9-Pt Calib Grid</button>
+    <button class="btn btn-green" onclick="startAccuracyTest()">🎯 Test Calibration Accuracy</button>
+    <button class="btn" onclick="startPlayground()">🎮 Gaze Playground</button>
     <button class="btn" onclick="resetAdaptation()">Reset to Prior</button>
   </div>
 
@@ -456,8 +595,54 @@ INDEX_HTML = """<!DOCTYPE html>
 
   <canvas id="hidden-canvas" style="display: none;" width="640" height="480"></canvas>
 
+  <!-- Profile Inspector Modal -->
+  <div id="profile-modal" class="modal-overlay" onclick="closeProfileModal(event)">
+    <div class="modal-box" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <div class="modal-title">Active Calibration Profile (JSON)</div>
+        <button class="close-btn" onclick="closeProfileModal()">&times;</button>
+      </div>
+      <p style="font-size: 13px; color: var(--text-dim); margin-bottom: 12px;">
+        Loaded from <code style="color: var(--accent-cyan);">~/.eyemouse/profiles/active_profile.json</code>.
+        Contains the adapted weights $W$ and prior covariance matrix $P$.
+      </p>
+      <pre id="profile-json-content" class="code-block">Loading profile...</pre>
+      <div style="margin-top: 16px; display: flex; justify-content: flex-end; gap: 10px;">
+        <button class="btn" onclick="closeProfileModal()">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Accuracy Validation Scorecard Modal -->
+  <div id="scorecard-modal" class="modal-overlay" onclick="closeScorecardModal(event)">
+    <div class="modal-box" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <div class="modal-title">Objective Accuracy Validation Report</div>
+        <button class="close-btn" onclick="closeScorecardModal()">&times;</button>
+      </div>
+      <div id="scorecard-summary" style="margin-bottom: 16px;"></div>
+      <table class="metrics-table">
+        <thead>
+          <tr>
+            <th>Target</th>
+            <th>Target Pos (px)</th>
+            <th>Predicted Gaze (px)</th>
+            <th>Pixel Error</th>
+            <th>Visual Angle</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="scorecard-table-body"></tbody>
+      </table>
+      <div style="margin-top: 16px; display: flex; justify-content: flex-end; gap: 10px;">
+        <button class="btn btn-primary" onclick="closeScorecardModal()">Done</button>
+      </div>
+    </div>
+  </div>
+
   <script>
-    // State Variables
+    // State Management
+    let mode = "calibration"; // "calibration" | "accuracy_test" | "playground"
     let targets = [
       { name: "Center", x: 0.5, y: 0.5 },
       { name: "Top-Left", x: 0.15, y: 0.15 },
@@ -465,21 +650,48 @@ INDEX_HTML = """<!DOCTYPE html>
       { name: "Bottom-Left", x: 0.15, y: 0.85 },
       { name: "Bottom-Right", x: 0.85, y: 0.85 }
     ];
+    let validationTargets = [
+      { name: "Val-Mid-Top", x: 0.50, y: 0.25 },
+      { name: "Val-Mid-Left", x: 0.30, y: 0.50 },
+      { name: "Val-Mid-Right", x: 0.70, y: 0.50 },
+      { name: "Val-Mid-Bottom", x: 0.50, y: 0.75 },
+      { name: "Val-Inner-TopLeft", x: 0.35, y: 0.35 },
+      { name: "Val-Inner-BottomRight", x: 0.65, y: 0.65 },
+      { name: "Val-Center-Offset", x: 0.45, y: 0.55 },
+      { name: "Val-Center", x: 0.50, y: 0.50 }
+    ];
     let currentTargetIdx = 0;
     let latestFeatures = [0.5, 0.5, 0.5, 0.5, 0.0, 0.0, 0.0];
+    let latestGaze = { u: 0.5, v: 0.5, valid: false };
     let isProcessing = false;
     let fpsFrames = 0;
     let fpsStart = performance.now();
     let adaptedCount = 0;
+    let validationResults = [];
+
+    // Playground Targets
+    let playgroundTargets = [];
+    let playgroundScore = 0;
+    let currentDwellTarget = null;
+    let dwellStartTime = 0;
 
     const video = document.getElementById("webcam-video");
     const hiddenCanvas = document.getElementById("hidden-canvas");
     const hctx = hiddenCanvas.getContext("2d");
+    const drawCanvas = document.getElementById("canvas-layer");
+    const dctx = drawCanvas.getContext("2d");
     const targetEl = document.getElementById("calib-target");
     const gazeCursor = document.getElementById("gaze-cursor");
     const counterEl = document.getElementById("calib-counter");
 
-    // Initialize Camera
+    function resizeCanvas() {
+      drawCanvas.width = window.innerWidth;
+      drawCanvas.height = window.innerHeight;
+    }
+    window.addEventListener("resize", resizeCanvas);
+    resizeCanvas();
+
+    // Camera Init
     async function initCamera() {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
@@ -497,21 +709,27 @@ INDEX_HTML = """<!DOCTYPE html>
       }
     }
 
-    // Set Active Target Position
+    // Set Active Calibration / Validation Target
     function setTarget(idx) {
-      if (idx >= targets.length) {
-        // Calibration completed!
-        document.getElementById("banner").innerHTML = "🎉 <b>Calibration Complete!</b> Model adapted online to your eyes.";
-        targetEl.style.display = "none";
-        counterEl.innerText = "Completed (" + targets.length + " pts)";
+      const activeList = (mode === "accuracy_test") ? validationTargets : targets;
+      if (idx >= activeList.length) {
+        if (mode === "calibration") {
+          document.getElementById("banner").innerHTML = "🎉 <b>Calibration Complete!</b> Gaze model adapted online. Try <b>Test Accuracy</b> or <b>Gaze Playground</b> below.";
+          targetEl.style.display = "none";
+          counterEl.innerText = "Completed (" + activeList.length + " pts)";
+        } else if (mode === "accuracy_test") {
+          finishAccuracyTest();
+        }
         return;
       }
       targetEl.style.display = "flex";
       currentTargetIdx = idx;
-      const t = targets[idx];
+      const t = activeList[idx];
       targetEl.style.left = (t.x * 100) + "%";
       targetEl.style.top = (t.y * 100) + "%";
-      counterEl.innerText = "Target " + (idx + 1) + " of " + targets.length + " (" + t.name + ")";
+
+      const prefix = (mode === "accuracy_test") ? "Validation Point" : "Target";
+      counterEl.innerText = prefix + " " + (idx + 1) + " of " + activeList.length + " (" + t.name + ")";
     }
 
     // Main Vision Processing Loop
@@ -534,7 +752,7 @@ INDEX_HTML = """<!DOCTYPE html>
           // Update HUD
           document.getElementById("hud-latency").innerText = latency + " ms";
           document.getElementById("hud-face").innerText = data.face_detected ? "Tracking (OK)" : "Face Lost";
-          document.getElementById("hud-face").style.color = data.face_detected ? "var(--accent-green)" : "#ff4444";
+          document.getElementById("hud-face").style.color = data.face_detected ? "var(--accent-green)" : "var(--accent-red)";
 
           if (data.head_pose) {
             document.getElementById("hud-pose").innerText =
@@ -554,14 +772,26 @@ INDEX_HTML = """<!DOCTYPE html>
           }
 
           if (data.gaze && data.gaze.is_valid) {
-            const gx = data.gaze.filtered_x;
-            const gy = data.gaze.filtered_y;
-            document.getElementById("hud-gaze").innerText = gx.toFixed(2) + ", " + gy.toFixed(2);
+            latestGaze = { u: data.gaze.filtered_x, v: data.gaze.filtered_y, valid: true };
+            const gx = latestGaze.u;
+            const gy = latestGaze.v;
+            const screenX = Math.round(gx * window.innerWidth);
+            const screenY = Math.round(gy * window.innerHeight);
+
+            document.getElementById("hud-gaze").innerText = gx.toFixed(3) + ", " + gy.toFixed(3);
+            document.getElementById("hud-px").innerText = screenX + "px, " + screenY + "px";
 
             // Move gaze cursor
             gazeCursor.style.display = "block";
-            gazeCursor.style.left = (gx * window.innerWidth) + "px";
-            gazeCursor.style.top = (gy * window.innerHeight) + "px";
+            gazeCursor.style.left = screenX + "px";
+            gazeCursor.style.top = screenY + "px";
+
+            // If in playground mode, check dwell hit
+            if (mode === "playground") {
+              checkPlaygroundHit(screenX, screenY);
+            }
+          } else {
+            latestGaze.valid = false;
           }
 
           // FPS calculation
@@ -573,7 +803,7 @@ INDEX_HTML = """<!DOCTYPE html>
             fpsStart = now;
           }
         } catch (err) {
-          // Frame error ignored
+          // ignore transient frame fetch errors
         } finally {
           isProcessing = false;
         }
@@ -581,32 +811,58 @@ INDEX_HTML = """<!DOCTYPE html>
       requestAnimationFrame(processLoop);
     }
 
-    // Capture Calibration Point (Spacebar or Button)
+    // Capture Calibration / Validation Point (Spacebar or Button)
     async function capturePoint() {
-      if (currentTargetIdx >= targets.length) return;
-      const t = targets[currentTargetIdx];
+      if (mode === "playground") return;
+      const activeList = (mode === "accuracy_test") ? validationTargets : targets;
+      if (currentTargetIdx >= activeList.length) return;
+      const t = activeList[currentTargetIdx];
 
       // Visual Confirmation Animation
       targetEl.classList.add("confirmed-pulse");
       const center = targetEl.querySelector(".target-center");
       if (center) center.style.background = "var(--accent-green)";
 
-      try {
-        const res = await fetch("/api/adapt_point", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            features: latestFeatures,
-            target_norm_x: t.x,
-            target_norm_y: t.y,
-            weight: 1.0
-          })
+      if (mode === "calibration") {
+        try {
+          const res = await fetch("/api/adapt_point", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              features: latestFeatures,
+              target_norm_x: t.x,
+              target_norm_y: t.y,
+              weight: 1.0
+            })
+          });
+          const resp = await res.json();
+          adaptedCount = resp.adaptation_points_count || (adaptedCount + 1);
+          document.getElementById("hud-adapted").innerText = adaptedCount + " pts";
+        } catch (err) {
+          console.error("Adaptation error:", err);
+        }
+      } else if (mode === "accuracy_test") {
+        // Record validation point prediction
+        const targetPxX = t.x * window.innerWidth;
+        const targetPxY = t.y * window.innerHeight;
+        const predPxX = latestGaze.u * window.innerWidth;
+        const predPxY = latestGaze.v * window.innerHeight;
+        const errPx = Math.hypot(predPxX - targetPxX, predPxY - targetPxY);
+        // Approx visual degrees at ~55 cm on typical ~220 PPI display: ~35 px per degree
+        const degErr = (errPx / 35.0).toFixed(2);
+
+        validationResults.push({
+          name: t.name,
+          targetX: Math.round(targetPxX),
+          targetY: Math.round(targetPxY),
+          predX: Math.round(predPxX),
+          predY: Math.round(predPxY),
+          errorPx: Math.round(errPx),
+          errorDeg: parseFloat(degErr)
         });
-        const resp = await res.json();
-        adaptedCount++;
-        document.getElementById("hud-adapted").innerText = adaptedCount + " pts";
-      } catch (err) {
-        console.error("Adaptation error:", err);
+
+        // Draw temporary error line on canvas
+        drawErrorVector(targetPxX, targetPxY, predPxX, predPxY, errPx);
       }
 
       setTimeout(() => {
@@ -614,6 +870,172 @@ INDEX_HTML = """<!DOCTYPE html>
         if (center) center.style.background = "var(--accent-cyan)";
         setTarget(currentTargetIdx + 1);
       }, 300);
+    }
+
+    function drawErrorVector(tx, ty, px, py, errPx) {
+      dctx.save();
+      dctx.beginPath();
+      dctx.moveTo(tx, ty);
+      dctx.lineTo(px, py);
+      dctx.strokeStyle = errPx < 60 ? "#00ff88" : (errPx < 120 ? "#ffaa00" : "#ff4466");
+      dctx.lineWidth = 3;
+      dctx.stroke();
+
+      // Predicted pip
+      dctx.beginPath();
+      dctx.arc(px, py, 6, 0, Math.PI * 2);
+      dctx.fillStyle = dctx.strokeStyle;
+      dctx.fill();
+
+      // Error label
+      dctx.font = "bold 12px monospace";
+      dctx.fillStyle = "#fff";
+      dctx.fillText(Math.round(errPx) + "px", (tx + px) / 2 + 8, (ty + py) / 2);
+      dctx.restore();
+    }
+
+    // Finish Accuracy Test & Show Objective Scorecard
+    function finishAccuracyTest() {
+      targetEl.style.display = "none";
+      const count = validationResults.length;
+      if (count === 0) return;
+
+      const errors = validationResults.map(r => r.errorPx).sort((a, b) => a - b);
+      const medianErr = errors[Math.floor(count / 2)];
+      const p95Idx = Math.min(count - 1, Math.floor(count * 0.95));
+      const p95Err = errors[p95Idx];
+      const meanDeg = (validationResults.reduce((acc, r) => acc + r.errorDeg, 0) / count).toFixed(2);
+
+      let grade = "EXCELLENT";
+      let gradeColor = "var(--accent-green)";
+      if (medianErr > 150) {
+        grade = "FAIR / UNCALIBRATED";
+        gradeColor = "var(--accent-red)";
+      } else if (medianErr > 80) {
+        grade = "GOOD";
+        gradeColor = "var(--accent-orange)";
+      }
+
+      const summaryHtml = `
+        <div style="background: rgba(255,255,255,0.06); padding: 16px; border-radius: 10px; margin-bottom: 16px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+            <span style="font-size: 14px; color: var(--text-dim);">Calibration Accuracy Grade:</span>
+            <span style="font-size: 16px; font-weight: bold; color: ${gradeColor};">${grade}</span>
+          </div>
+          <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; font-family: monospace;">
+            <div><div style="color: var(--text-dim); font-size: 11px;">MEDIAN ERROR</div><div style="font-size: 18px; color: var(--accent-cyan); font-weight: bold;">${medianErr} px</div></div>
+            <div><div style="color: var(--text-dim); font-size: 11px;">P95 ERROR</div><div style="font-size: 18px; color: var(--accent-cyan); font-weight: bold;">${p95Err} px</div></div>
+            <div><div style="color: var(--text-dim); font-size: 11px;">MEAN ANGLE</div><div style="font-size: 18px; color: var(--accent-cyan); font-weight: bold;">${meanDeg}°</div></div>
+          </div>
+        </div>
+      `;
+      document.getElementById("scorecard-summary").innerHTML = summaryHtml;
+
+      const tbody = document.getElementById("scorecard-table-body");
+      tbody.innerHTML = "";
+      validationResults.forEach(r => {
+        const isOk = r.errorPx <= 90;
+        const statusHtml = isOk
+          ? '<span style="color: var(--accent-green); font-weight: bold;">PASS</span>'
+          : '<span style="color: var(--accent-orange); font-weight: bold;">CHECK</span>';
+        const row = `
+          <tr>
+            <td style="font-weight: 600;">${r.name}</td>
+            <td style="font-family: monospace;">(${r.targetX}, ${r.targetY})</td>
+            <td style="font-family: monospace;">(${r.predX}, ${r.predY})</td>
+            <td style="font-family: monospace; font-weight: bold; color: ${isOk ? 'var(--accent-green)' : 'var(--accent-orange)'};">${r.errorPx} px</td>
+            <td style="font-family: monospace;">${r.errorDeg}°</td>
+            <td>${statusHtml}</td>
+          </tr>
+        `;
+        tbody.innerHTML += row;
+      });
+
+      document.getElementById("scorecard-modal").style.display = "flex";
+      document.getElementById("banner").innerHTML = "🎯 Accuracy test complete! Scorecard displayed. Lines on screen show error vectors.";
+    }
+
+    // Interactive Gaze Playground ("Try It Out" Bubble Test)
+    function startPlayground() {
+      mode = "playground";
+      dctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+      targetEl.style.display = "none";
+      document.getElementById("hud-mode-tag").innerText = "PLAYGROUND";
+      document.getElementById("hud-mode-tag").style.color = "var(--accent-cyan)";
+      document.getElementById("banner").innerHTML = "🎮 <b>Gaze Playground:</b> Look directly at the target bubbles and dwell for ~0.3s to pop them!";
+      counterEl.innerText = "Target Practice: Hits 0 / 5";
+
+      clearPlaygroundBubbles();
+      playgroundScore = 0;
+      spawnPlaygroundTarget(1);
+    }
+
+    function clearPlaygroundBubbles() {
+      document.querySelectorAll(".playground-bubble").forEach(el => el.remove());
+    }
+
+    function spawnPlaygroundTarget(step) {
+      clearPlaygroundBubbles();
+      if (step > 5) {
+        document.getElementById("banner").innerHTML = "🎉 <b>Target Practice Complete!</b> All 5 bubbles popped by your gaze.";
+        counterEl.innerText = "Playground: 5 of 5 Targets Hit!";
+        return;
+      }
+      const coords = [
+        { x: 0.50, y: 0.50, name: "Center" },
+        { x: 0.20, y: 0.25, name: "Top-Left" },
+        { x: 0.80, y: 0.25, name: "Top-Right" },
+        { x: 0.25, y: 0.75, name: "Bottom-Left" },
+        { x: 0.75, y: 0.75, name: "Bottom-Right" }
+      ];
+      const cur = coords[step - 1];
+      const bubble = document.createElement("div");
+      bubble.className = "playground-bubble";
+      bubble.style.left = (cur.x * 100) + "%";
+      bubble.style.top = (cur.y * 100) + "%";
+      bubble.innerHTML = `<span>Look!</span><span style="font-size: 9px; opacity: 0.8;">#${step}</span>`;
+      bubble.dataset.step = step;
+      bubble.dataset.px = Math.round(cur.x * window.innerWidth);
+      bubble.dataset.py = Math.round(cur.y * window.innerHeight);
+      document.body.appendChild(bubble);
+      counterEl.innerText = `Target Practice: Bubble ${step} of 5 (${cur.name})`;
+    }
+
+    function checkPlaygroundHit(gx, gy) {
+      const bubble = document.querySelector(".playground-bubble");
+      if (!bubble) return;
+      const rect = bubble.getBoundingClientRect();
+      const bx = rect.left + rect.width / 2;
+      const by = rect.top + rect.height / 2;
+      const dist = Math.hypot(gx - bx, gy - by);
+
+      // Hit threshold radius ~75 px
+      if (dist < 75) {
+        bubble.classList.add("dwell-active");
+        if (currentDwellTarget !== bubble) {
+          currentDwellTarget = bubble;
+          dwellStartTime = performance.now();
+        } else {
+          const dwellTime = performance.now() - dwellStartTime;
+          if (dwellTime >= 350) { // 350ms dwell to pop!
+            popPlaygroundBubble(bubble);
+          }
+        }
+      } else {
+        if (currentDwellTarget === bubble) {
+          bubble.classList.remove("dwell-active");
+          currentDwellTarget = null;
+        }
+      }
+    }
+
+    function popPlaygroundBubble(bubble) {
+      const step = parseInt(bubble.dataset.step, 10);
+      bubble.style.transform = "scale(1.8)";
+      bubble.style.opacity = "0";
+      setTimeout(() => {
+        spawnPlaygroundTarget(step + 1);
+      }, 250);
     }
 
     // Keyboard Shortcuts
@@ -627,21 +1049,34 @@ INDEX_HTML = """<!DOCTYPE html>
         startFivePoint();
       } else if (e.key === "9") {
         startNinePoint();
+      } else if (e.key.toLowerCase() === "t") {
+        startAccuracyTest();
+      } else if (e.key.toLowerCase() === "p") {
+        startPlayground();
       } else if (e.code === "Escape") {
+        closeScorecardModal();
+        closeProfileModal();
         if (document.fullscreenElement) {
           document.exitFullscreen();
         }
       }
     });
 
-    // Calibration Launchers
+    // Launchers
     function startQuickOnePoint() {
+      mode = "calibration";
+      clearPlaygroundBubbles();
+      dctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
       targets = [{ name: "Screen Center", x: 0.5, y: 0.5 }];
+      document.getElementById("hud-mode-tag").innerText = "1-PT CALIB";
       document.getElementById("banner").innerHTML = "Look at the center dot, then press <span class='kbd-key'>SPACEBAR</span>.";
       setTarget(0);
     }
 
     function startFivePoint() {
+      mode = "calibration";
+      clearPlaygroundBubbles();
+      dctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
       targets = [
         { name: "Center", x: 0.5, y: 0.5 },
         { name: "Top-Left", x: 0.15, y: 0.15 },
@@ -649,11 +1084,15 @@ INDEX_HTML = """<!DOCTYPE html>
         { name: "Bottom-Left", x: 0.15, y: 0.85 },
         { name: "Bottom-Right", x: 0.85, y: 0.85 }
       ];
+      document.getElementById("hud-mode-tag").innerText = "5-PT CALIB";
       document.getElementById("banner").innerHTML = "Look at each dot, then press <span class='kbd-key'>SPACEBAR</span> to capture.";
       setTarget(0);
     }
 
     function startNinePoint() {
+      mode = "calibration";
+      clearPlaygroundBubbles();
+      dctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
       targets = [
         { name: "Center", x: 0.5, y: 0.5 },
         { name: "Top-Left", x: 0.15, y: 0.15 },
@@ -665,7 +1104,19 @@ INDEX_HTML = """<!DOCTYPE html>
         { name: "Bottom-Left", x: 0.15, y: 0.85 },
         { name: "Left-Center", x: 0.15, y: 0.5 }
       ];
+      document.getElementById("hud-mode-tag").innerText = "9-PT CALIB";
       document.getElementById("banner").innerHTML = "Look at each dot, then press <span class='kbd-key'>SPACEBAR</span> to capture.";
+      setTarget(0);
+    }
+
+    function startAccuracyTest() {
+      mode = "accuracy_test";
+      clearPlaygroundBubbles();
+      dctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+      validationResults = [];
+      document.getElementById("hud-mode-tag").innerText = "ACCURACY TEST";
+      document.getElementById("hud-mode-tag").style.color = "var(--accent-orange)";
+      document.getElementById("banner").innerHTML = "🎯 <b>Accuracy Test:</b> Look at each test dot and press <span class='kbd-key'>SPACEBAR</span> to measure correctness.";
       setTarget(0);
     }
 
@@ -678,6 +1129,25 @@ INDEX_HTML = """<!DOCTYPE html>
       } catch (err) {
         console.error(err);
       }
+    }
+
+    async function openProfileModal() {
+      try {
+        const res = await fetch("/api/profile");
+        const json = await res.json();
+        document.getElementById("profile-json-content").innerText = JSON.stringify(json, null, 2);
+      } catch (err) {
+        document.getElementById("profile-json-content").innerText = "Failed to load active_profile.json";
+      }
+      document.getElementById("profile-modal").style.display = "flex";
+    }
+
+    function closeProfileModal() {
+      document.getElementById("profile-modal").style.display = "none";
+    }
+
+    function closeScorecardModal() {
+      document.getElementById("scorecard-modal").style.display = "none";
     }
 
     function toggleFullscreen() {
@@ -698,7 +1168,7 @@ INDEX_HTML = """<!DOCTYPE html>
 
 
 class EyeMouseHTTPRequestHandler(BaseHTTPRequestHandler):
-    """Handles HTTP requests for web-based gaze tracking and online adaptation."""
+    """Handles HTTP requests for web-based gaze tracking, calibration, and accuracy validation."""
 
     def do_GET(self) -> None:
         if self.path == "/" or self.path.startswith("/?"):
@@ -716,6 +1186,25 @@ class EyeMouseHTTPRequestHandler(BaseHTTPRequestHandler):
                 "is_calibrated": p.gaze_estimator.is_calibrated,
             }
             self._send_json(data)
+        elif self.path == "/api/profile":
+            profile_path = DEFAULT_PROFILE_DIR / DEFAULT_PROFILE_NAME
+            if profile_path.exists():
+                try:
+                    with open(profile_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    self._send_json(data)
+                    return
+                except Exception as exc:
+                    log.error("Failed reading profile: %s", exc)
+            # Fallback to current pipeline profile
+            p = get_pipeline()
+            try:
+                saved = p.save_active_profile()
+                with open(saved, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                self._send_json(data)
+            except Exception as exc:
+                self._send_json({"error": str(exc), "model": "AdaptiveGazeModel"})
         else:
             self.send_error(HTTPStatus.NOT_FOUND, "Not Found")
 
