@@ -291,7 +291,7 @@ class AdaptiveGazeModel(BaseGazeModel):
 
 def train_global_ridge_model(
     samples_path: Path,
-    alpha: float = 2.0,
+    alpha: float = 0.002,
     output_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Train global Ridge regression gaze model on multi-user crowdsourced samples.

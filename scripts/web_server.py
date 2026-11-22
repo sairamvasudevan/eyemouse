@@ -85,6 +85,18 @@ def get_pipeline() -> VisionPipeline:
     if pipeline is None:
         log.info("Initializing VisionPipeline with AdaptiveGazeModel...")
         pipeline = VisionPipeline()
+        # Automatically load previously trained global model if available
+        global_model_file = PROJECT_ROOT / "models" / "global_trained_model.json"
+        if global_model_file.exists():
+            try:
+                with open(global_model_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if "weights" in data:
+                    pipeline.load_trained_weights(np.array(data["weights"], dtype=np.float64))
+                    log.info("Loaded trained global model weights from %s", global_model_file)
+            except Exception as exc:
+                log.warning("Could not pre-load global model: %s", exc)
+
         try:
             profile_path = pipeline.save_active_profile()
             log.info("Active profile initialized at %s", profile_path)
@@ -854,6 +866,7 @@ INDEX_HTML = """<!DOCTYPE html>
   <!-- Bottom Controls -->
   <div id="controls">
     <button class="btn btn-primary" onclick="capturePoint()">Capture Target (Space)</button>
+    <button class="btn btn-green" onclick="trainGlobalModel()">🧠 Train Model Now</button>
     <a href="/dashboard" class="btn btn-purple">📊 Open Monitoring Dashboard</a>
     <button class="btn" onclick="exportDataset()">💾 Export Dataset (JSONL)</button>
     <button class="btn" onclick="resetCurriculum()">Restart 100 Points</button>
@@ -975,8 +988,9 @@ INDEX_HTML = """<!DOCTYPE html>
       if (idx >= targets100.length) {
         targetEl.style.display = "none";
         document.getElementById("banner-text").innerHTML =
-          `🎉 <b>Incredible Job! All 100 Points Completed!</b> Your data is logged and the model is adapted. View the <a href="/dashboard" style="color: #00f0ff;">Live Dashboard</a> to see all systems.`;
+          `🎉 <b>Incredible Job! All 100 Points Completed!</b> Retraining and optimizing model on all collected samples...`;
         updateProgressUI(100);
+        trainGlobalModel();
         return;
       }
       targetEl.style.display = "flex";
@@ -1191,6 +1205,10 @@ INDEX_HTML = """<!DOCTYPE html>
         if (resp.total_samples) {
           document.getElementById("hud-dataset-pts").innerText = `${resp.total_samples} samples`;
         }
+        if (resp.fitted_error_px) {
+          document.getElementById("hud-mode-tag").innerText = `TRAINED (${resp.fitted_error_px}px)`;
+          document.getElementById("hud-mode-tag").style.color = "var(--accent-green)";
+        }
       } catch (err) {
         console.error("Failed recording sample:", err);
       }
@@ -1273,6 +1291,22 @@ INDEX_HTML = """<!DOCTYPE html>
 
     function exportDataset() {
       window.location.href = "/api/training_ground/export";
+    }
+
+    async function trainGlobalModel() {
+      try {
+        const res = await fetch("/api/training_ground/train_global_model", { method: "POST" });
+        const data = await res.json();
+        if (!data.success) {
+          alert("Training Notice: " + (data.error || "Need more samples to train."));
+          return;
+        }
+        document.getElementById("hud-mode-tag").innerText = `TRAINED (${data.fitted_pixel_error_1080p}px)`;
+        document.getElementById("hud-mode-tag").style.color = "var(--accent-green)";
+        alert(`🎉 Model Trained Successfully!\n\nSamples: ${data.sample_count} points\nPrior Error: ${data.prior_pixel_error_1080p} px\nTrained Error: ${data.fitted_pixel_error_1080p} px\nError Reduction: ${data.improvement_percent}%\n\nThe live pointer now uses your trained ocular parameters!`);
+      } catch (err) {
+        alert("Training request failed: " + err);
+      }
     }
 
     function toggleFullscreen() {
@@ -2147,10 +2181,31 @@ class EyeMouseHTTPRequestHandler(BaseHTTPRequestHandler):
                     active_sessions[session_id]["last_seen"] = time.time()
 
         stats = get_dataset_stats()
+        total_samples = stats["total_samples"]
+
+        # Real-time auto-training on the fly: Refit optimal Ridge weights so model actively improves
+        fitted_err = None
+        imp_pct = None
+        if total_samples >= 3 and (total_samples <= 20 or total_samples % 2 == 0 or total_samples in [25, 50, 75, 100]):
+            try:
+                global_model_file = PROJECT_ROOT / "models" / "global_trained_model.json"
+                res = train_global_ridge_model(DATASET_FILE, alpha=0.002, output_path=global_model_file)
+                if res.get("success") and res.get("weights"):
+                    weights = np.array(res["weights"], dtype=np.float64)
+                    p.load_trained_weights(weights)
+                    fitted_err = res.get("fitted_pixel_error_1080p")
+                    imp_pct = res.get("improvement_percent")
+                    log.info("Live model auto-trained on %d samples! Mean error: %.1f px (%s%% gain)",
+                             total_samples, fitted_err or 0, imp_pct or 0)
+            except Exception as e:
+                log.warning("Auto-training error: %s", e)
+
         self._send_json({
             "status": "SAMPLE_RECORDED",
-            "total_samples": stats["total_samples"],
+            "total_samples": total_samples,
             "participant_count": stats["participant_count"],
+            "fitted_error_px": fitted_err,
+            "improvement_pct": imp_pct,
         })
 
     def _handle_train_global_model(self) -> None:
@@ -2161,7 +2216,7 @@ class EyeMouseHTTPRequestHandler(BaseHTTPRequestHandler):
 
         res = train_global_ridge_model(
             samples_path=DATASET_FILE,
-            alpha=2.0,
+            alpha=0.002,
             output_path=global_model_file,
         )
 
