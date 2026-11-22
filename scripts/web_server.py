@@ -5,10 +5,11 @@ Runs an HTTP server on localhost (port 8080 or available).
 Provides:
 1. Live camera capture & MediaPipe facial landmark + iris tracking.
 2. Self-learning Bayesian Adaptive Gaze Model (RLS online updates).
-3. Interactive keypress calibration (Look at dot -> Press SPACEBAR to capture).
-4. Accuracy Validation Test mode: Held-out targets measuring exact pixel & angular error.
-5. Interactive Gaze Playground: Look-to-pop target bubbles to test actual eye control.
-6. Calibrated Profile Inspector: View/download active_profile.json.
+3. Live Gaze Pointer with real-time distance vector to targets.
+4. Interactive keypress calibration (Look at dot -> Press SPACEBAR to capture).
+5. Accuracy Validation Test mode: Held-out targets measuring exact pixel & angular error.
+6. Interactive Gaze Playground: Look-to-pop target bubbles to test actual eye control.
+7. Calibrated Profile Inspector: View/download active_profile.json.
 """
 
 from __future__ import annotations
@@ -49,7 +50,7 @@ def get_pipeline() -> VisionPipeline:
     global pipeline
     if pipeline is None:
         log.info("Initializing VisionPipeline with AdaptiveGazeModel...")
-        pipeline = VisionPipeline(use_calibrated_model=True)
+        pipeline = VisionPipeline()
         try:
             profile_path = pipeline.save_active_profile()
             log.info("Active profile initialized at %s", profile_path)
@@ -83,6 +84,7 @@ INDEX_HTML = """<!DOCTYPE html>
       --card-bg: rgba(20, 28, 47, 0.88);
       --accent-cyan: #00f0ff;
       --accent-green: #00ff88;
+      --accent-yellow: #ffea00;
       --accent-orange: #ffaa00;
       --accent-red: #ff4466;
       --text: #f0f6fc;
@@ -100,7 +102,7 @@ INDEX_HTML = """<!DOCTYPE html>
       position: relative;
     }
     
-    /* Fullscreen Drawing Canvas */
+    /* Fullscreen Drawing Canvas for Error Vectors, Distance Lines, & Gaze Trail */
     #canvas-layer {
       position: absolute;
       top: 0;
@@ -111,42 +113,77 @@ INDEX_HTML = """<!DOCTYPE html>
       z-index: 10;
     }
     
-    /* Live Gaze Reticle */
+    /* High-Visibility Laser Gaze Pointer */
     #gaze-cursor {
       position: absolute;
-      width: 34px;
-      height: 34px;
-      margin-left: -17px;
-      margin-top: -17px;
+      width: 36px;
+      height: 36px;
+      margin-left: -18px;
+      margin-top: -18px;
       border: 2px solid var(--accent-cyan);
       border-radius: 50%;
       background: rgba(0, 240, 255, 0.25);
-      box-shadow: 0 0 16px var(--accent-cyan);
+      box-shadow: 0 0 20px var(--accent-cyan);
       pointer-events: none;
       transition: transform 0.04s linear, opacity 0.2s ease;
-      z-index: 25;
-      display: none;
+      z-index: 40;
+      display: block;
     }
     #gaze-cursor::after {
       content: '';
       position: absolute;
       top: 50%;
       left: 50%;
-      width: 6px;
-      height: 6px;
-      margin-left: -3px;
-      margin-top: -3px;
+      width: 8px;
+      height: 8px;
+      margin-left: -4px;
+      margin-top: -4px;
       border-radius: 50%;
       background: #fff;
+      box-shadow: 0 0 8px #fff;
+    }
+    .gaze-tag {
+      position: absolute;
+      top: -24px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0, 240, 255, 0.9);
+      color: #000;
+      font-family: monospace;
+      font-size: 10px;
+      font-weight: 900;
+      padding: 2px 6px;
+      border-radius: 4px;
+      white-space: nowrap;
+      pointer-events: none;
+      letter-spacing: 0.5px;
+    }
+    .gaze-cross-h {
+      position: absolute;
+      top: 50%;
+      left: -8px;
+      width: 52px;
+      height: 1.5px;
+      background: rgba(0, 240, 255, 0.6);
+      transform: translateY(-50%);
+    }
+    .gaze-cross-v {
+      position: absolute;
+      left: 50%;
+      top: -8px;
+      height: 52px;
+      width: 1.5px;
+      background: rgba(0, 240, 255, 0.6);
+      transform: translateX(-50%);
     }
 
     /* Calibration / Validation Target Dot */
     #calib-target {
       position: absolute;
-      width: 52px;
-      height: 52px;
-      margin-left: -26px;
-      margin-top: -26px;
+      width: 54px;
+      height: 54px;
+      margin-left: -27px;
+      margin-top: -27px;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -156,18 +193,18 @@ INDEX_HTML = """<!DOCTYPE html>
     }
     .target-ring {
       position: absolute;
-      width: 48px;
-      height: 48px;
-      border: 3px solid var(--accent-cyan);
+      width: 50px;
+      height: 50px;
+      border: 3px solid var(--accent-yellow);
       border-radius: 50%;
       animation: pulse-ring 1.8s infinite ease-out;
     }
     .target-center {
-      width: 16px;
-      height: 16px;
+      width: 18px;
+      height: 18px;
       border-radius: 50%;
-      background: var(--accent-cyan);
-      box-shadow: 0 0 16px var(--accent-cyan);
+      background: var(--accent-yellow);
+      box-shadow: 0 0 16px var(--accent-yellow);
       position: relative;
     }
     .target-center::after {
@@ -179,20 +216,20 @@ INDEX_HTML = """<!DOCTYPE html>
       height: 4px;
       margin-left: -2px;
       margin-top: -2px;
-      background: #fff;
+      background: #000;
       border-radius: 50%;
     }
     .target-cross-h {
       position: absolute;
-      width: 36px;
+      width: 38px;
       height: 2px;
-      background: rgba(0, 240, 255, 0.4);
+      background: rgba(255, 234, 0, 0.5);
     }
     .target-cross-v {
       position: absolute;
       width: 2px;
-      height: 36px;
-      background: rgba(0, 240, 255, 0.4);
+      height: 38px;
+      background: rgba(255, 234, 0, 0.5);
     }
     
     @keyframes pulse-ring {
@@ -228,8 +265,8 @@ INDEX_HTML = """<!DOCTYPE html>
       gap: 12px;
     }
     .brand-icon {
-      width: 30px;
-      height: 30px;
+      width: 32px;
+      height: 32px;
       background: var(--accent-cyan);
       border-radius: 8px;
       display: flex;
@@ -346,11 +383,21 @@ INDEX_HTML = """<!DOCTYPE html>
       overflow: hidden;
       z-index: 50;
       box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+      position: relative;
     }
     #webcam-video {
       width: 100%;
       height: 100%;
       object-fit: cover;
+      transform: scaleX(-1);
+    }
+    #pip-canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
       transform: scaleX(-1);
     }
     #pip-badge {
@@ -366,6 +413,7 @@ INDEX_HTML = """<!DOCTYPE html>
       display: flex;
       align-items: center;
       gap: 5px;
+      z-index: 5;
     }
     .badge-dot {
       width: 6px;
@@ -389,7 +437,7 @@ INDEX_HTML = """<!DOCTYPE html>
       line-height: 1.6;
       color: var(--text-dim);
       z-index: 50;
-      min-width: 230px;
+      min-width: 240px;
     }
     .hud-title {
       font-size: 11px;
@@ -482,10 +530,10 @@ INDEX_HTML = """<!DOCTYPE html>
     /* Gaze Target Bubble in Playground Mode */
     .playground-bubble {
       position: absolute;
-      width: 70px;
-      height: 70px;
-      margin-left: -35px;
-      margin-top: -35px;
+      width: 74px;
+      height: 74px;
+      margin-left: -37px;
+      margin-top: -37px;
       border-radius: 50%;
       background: radial-gradient(circle, rgba(0,240,255,0.4) 0%, rgba(0,240,255,0.1) 70%);
       border: 2px solid var(--accent-cyan);
@@ -507,25 +555,19 @@ INDEX_HTML = """<!DOCTYPE html>
       transform: scale(1.15);
       box-shadow: 0 0 25px var(--accent-green);
     }
-    .dwell-ring {
-      position: absolute;
-      top: 0; left: 0;
-      width: 100%; height: 100%;
-      border-radius: 50%;
-      border: 3px solid transparent;
-      border-top-color: var(--accent-green);
-      animation: spin 0.4s linear infinite;
-      display: none;
-    }
   </style>
 </head>
 <body>
 
-  <!-- Fullscreen Drawing Canvas for Error Vectors & Heatmap -->
+  <!-- Fullscreen Drawing Canvas for Error Vectors & Distance Lines -->
   <canvas id="canvas-layer"></canvas>
 
-  <!-- Live Predicted Gaze Reticle -->
-  <div id="gaze-cursor"></div>
+  <!-- Live Predicted Gaze Pointer -->
+  <div id="gaze-cursor" style="left: 50%; top: 50%;">
+    <div class="gaze-cross-h"></div>
+    <div class="gaze-cross-v"></div>
+    <div class="gaze-tag">YOUR GAZE</div>
+  </div>
 
   <!-- Calibration / Validation Target -->
   <div id="calib-target" style="left: 50%; top: 50%;">
@@ -562,15 +604,17 @@ INDEX_HTML = """<!DOCTYPE html>
     <div>FPS: <span id="hud-fps" class="hud-val">0</span></div>
     <div>Gaze (u, v): <span id="hud-gaze" class="hud-val">0.50, 0.50</span></div>
     <div>Screen (px): <span id="hud-px" class="hud-val">0, 0</span></div>
+    <div>Iris UV: <span id="hud-iris" class="hud-val">L: 0.50, 0.00 | R: 0.50, 0.00</span></div>
     <div>Head Pose: <span id="hud-pose" class="hud-val">0°, 0°, 0°</span></div>
+    <div>Target Dist: <span id="hud-dist" class="hud-val">0 px</span></div>
     <div>Adapted: <span id="hud-adapted" class="hud-val">0 pts</span></div>
   </div>
 
   <!-- Instruction Banner -->
   <div id="banner">
-    <span>Look directly at the pulsing dot, then press</span>
+    <span>Look directly at the yellow dot, then press</span>
     <span class="kbd-key">SPACEBAR</span>
-    <span>to capture eye position.</span>
+    <span>to capture eye position. Watch the cyan pointer follow your eyes!</span>
   </div>
 
   <!-- Bottom Control Toolbar -->
@@ -591,6 +635,7 @@ INDEX_HTML = """<!DOCTYPE html>
       <span id="camera-status">WEBCAM LIVE</span>
     </div>
     <video id="webcam-video" autoplay playsinline muted></video>
+    <canvas id="pip-canvas" width="240" height="180"></canvas>
   </div>
 
   <canvas id="hidden-canvas" style="display: none;" width="640" height="480"></canvas>
@@ -661,7 +706,7 @@ INDEX_HTML = """<!DOCTYPE html>
       { name: "Val-Center", x: 0.50, y: 0.50 }
     ];
     let currentTargetIdx = 0;
-    let latestFeatures = [0.5, 0.5, 0.5, 0.5, 0.0, 0.0, 0.0];
+    let latestFeatures = [0.5, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0];
     let latestGaze = { u: 0.5, v: 0.5, valid: false };
     let isProcessing = false;
     let fpsFrames = 0;
@@ -670,7 +715,6 @@ INDEX_HTML = """<!DOCTYPE html>
     let validationResults = [];
 
     // Playground Targets
-    let playgroundTargets = [];
     let playgroundScore = 0;
     let currentDwellTarget = null;
     let dwellStartTime = 0;
@@ -680,6 +724,8 @@ INDEX_HTML = """<!DOCTYPE html>
     const hctx = hiddenCanvas.getContext("2d");
     const drawCanvas = document.getElementById("canvas-layer");
     const dctx = drawCanvas.getContext("2d");
+    const pipCanvas = document.getElementById("pip-canvas");
+    const pctx = pipCanvas.getContext("2d");
     const targetEl = document.getElementById("calib-target");
     const gazeCursor = document.getElementById("gaze-cursor");
     const counterEl = document.getElementById("calib-counter");
@@ -698,10 +744,17 @@ INDEX_HTML = """<!DOCTYPE html>
           video: { width: 640, height: 480, frameRate: { ideal: 30 } }
         });
         video.srcObject = stream;
+        video.play().catch(() => {});
         video.onloadedmetadata = () => {
           video.play();
           requestAnimationFrame(processLoop);
         };
+        // Fallback trigger in case metadata event fired early
+        setTimeout(() => {
+          if (video.readyState >= 2) {
+            requestAnimationFrame(processLoop);
+          }
+        }, 500);
       } catch (err) {
         console.error("Camera access error:", err);
         document.getElementById("camera-status").innerText = "CAM PERMISSION NEEDED";
@@ -734,11 +787,11 @@ INDEX_HTML = """<!DOCTYPE html>
 
     // Main Vision Processing Loop
     async function processLoop() {
-      if (!isProcessing && video.readyState === 4) {
+      if (!isProcessing && video.readyState >= 2) {
         isProcessing = true;
         const t0 = performance.now();
         hctx.drawImage(video, 0, 0, 640, 480);
-        const dataUrl = hiddenCanvas.toDataURL("image/jpeg", 0.7);
+        const dataUrl = hiddenCanvas.toDataURL("image/jpeg", 0.75);
 
         try {
           const res = await fetch("/api/process_frame", {
@@ -751,24 +804,49 @@ INDEX_HTML = """<!DOCTYPE html>
 
           // Update HUD
           document.getElementById("hud-latency").innerText = latency + " ms";
-          document.getElementById("hud-face").innerText = data.face_detected ? "Tracking (OK)" : "Face Lost";
-          document.getElementById("hud-face").style.color = data.face_detected ? "var(--accent-green)" : "var(--accent-red)";
+          if (data.error) {
+            document.getElementById("hud-face").innerText = "Pipeline Error";
+            document.getElementById("hud-face").style.color = "var(--accent-red)";
+          } else {
+            document.getElementById("hud-face").innerText = data.face_detected ? "Tracking (OK)" : "Face Lost";
+            document.getElementById("hud-face").style.color = data.face_detected ? "var(--accent-green)" : "var(--accent-red)";
+          }
 
           if (data.head_pose) {
             document.getElementById("hud-pose").innerText =
               data.head_pose.yaw + "°, " + data.head_pose.pitch + "°, " + data.head_pose.roll + "°";
           }
 
-          if (data.eye_features && data.head_pose) {
-            latestFeatures = [
-              data.eye_features.left_x,
-              data.eye_features.left_y,
-              data.eye_features.right_x,
-              data.eye_features.right_y,
-              data.head_pose.yaw,
-              data.head_pose.pitch,
-              data.head_pose.roll
-            ];
+          if (data.eye_features) {
+            const lx = data.eye_features.left_x;
+            const ly = data.eye_features.left_y;
+            const rx = data.eye_features.right_x;
+            const ry = data.eye_features.right_y;
+            document.getElementById("hud-iris").innerText = `L: ${lx.toFixed(2)}, ${ly.toFixed(2)} | R: ${rx.toFixed(2)}, ${ry.toFixed(2)}`;
+
+            if (data.head_pose) {
+              latestFeatures = [
+                lx, ly, rx, ry,
+                data.head_pose.yaw,
+                data.head_pose.pitch,
+                data.head_pose.roll
+              ];
+            }
+
+            // Draw pupil points on PIP canvas
+            pctx.clearRect(0, 0, pipCanvas.width, pipCanvas.height);
+            if (data.eye_features.left_iris_px && data.eye_features.right_iris_px) {
+              const scaleX = pipCanvas.width / 640.0;
+              const scaleY = pipCanvas.height / 480.0;
+              const lip = data.eye_features.left_iris_px;
+              const rip = data.eye_features.right_iris_px;
+
+              pctx.fillStyle = "#00ff88";
+              pctx.beginPath();
+              pctx.arc(lip[0] * scaleX, lip[1] * scaleY, 4, 0, Math.PI * 2);
+              pctx.arc(rip[0] * scaleX, rip[1] * scaleY, 4, 0, Math.PI * 2);
+              pctx.fill();
+            }
           }
 
           if (data.gaze && data.gaze.is_valid) {
@@ -781,10 +859,38 @@ INDEX_HTML = """<!DOCTYPE html>
             document.getElementById("hud-gaze").innerText = gx.toFixed(3) + ", " + gy.toFixed(3);
             document.getElementById("hud-px").innerText = screenX + "px, " + screenY + "px";
 
-            // Move gaze cursor
+            // Move the prominent live gaze cursor
             gazeCursor.style.display = "block";
             gazeCursor.style.left = screenX + "px";
             gazeCursor.style.top = screenY + "px";
+
+            // If in calibration or accuracy test, draw real-time distance vector line to active target
+            if ((mode === "calibration" || mode === "accuracy_test") && targetEl.style.display !== "none") {
+              const activeList = (mode === "accuracy_test") ? validationTargets : targets;
+              if (currentTargetIdx < activeList.length) {
+                const t = activeList[currentTargetIdx];
+                const tx = t.x * window.innerWidth;
+                const ty = t.y * window.innerHeight;
+                const distPx = Math.round(Math.hypot(screenX - tx, screenY - ty));
+                document.getElementById("hud-dist").innerText = distPx + " px";
+
+                dctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+                dctx.save();
+                dctx.beginPath();
+                dctx.setLineDash([4, 4]);
+                dctx.moveTo(tx, ty);
+                dctx.lineTo(screenX, screenY);
+                dctx.strokeStyle = distPx < 70 ? "rgba(0, 255, 136, 0.8)" : "rgba(0, 240, 255, 0.6)";
+                dctx.lineWidth = 2;
+                dctx.stroke();
+
+                // Draw distance text badge along vector
+                dctx.font = "bold 11px monospace";
+                dctx.fillStyle = distPx < 70 ? "#00ff88" : "#00f0ff";
+                dctx.fillText(distPx + "px", (tx + screenX) / 2 + 8, (ty + screenY) / 2);
+                dctx.restore();
+              }
+            }
 
             // If in playground mode, check dwell hit
             if (mode === "playground") {
@@ -803,7 +909,9 @@ INDEX_HTML = """<!DOCTYPE html>
             fpsStart = now;
           }
         } catch (err) {
-          // ignore transient frame fetch errors
+          // Display network or fetch error on HUD
+          document.getElementById("hud-face").innerText = "Conn Err";
+          document.getElementById("hud-face").style.color = "var(--accent-red)";
         } finally {
           isProcessing = false;
         }
@@ -861,23 +969,23 @@ INDEX_HTML = """<!DOCTYPE html>
           errorDeg: parseFloat(degErr)
         });
 
-        // Draw temporary error line on canvas
-        drawErrorVector(targetPxX, targetPxY, predPxX, predPxY, errPx);
+        // Draw persistent error line on canvas
+        drawPersistentErrorVector(targetPxX, targetPxY, predPxX, predPxY, errPx);
       }
 
       setTimeout(() => {
         targetEl.classList.remove("confirmed-pulse");
-        if (center) center.style.background = "var(--accent-cyan)";
+        if (center) center.style.background = "var(--accent-yellow)";
         setTarget(currentTargetIdx + 1);
       }, 300);
     }
 
-    function drawErrorVector(tx, ty, px, py, errPx) {
+    function drawPersistentErrorVector(tx, ty, px, py, errPx) {
       dctx.save();
       dctx.beginPath();
       dctx.moveTo(tx, ty);
       dctx.lineTo(px, py);
-      dctx.strokeStyle = errPx < 60 ? "#00ff88" : (errPx < 120 ? "#ffaa00" : "#ff4466");
+      dctx.strokeStyle = errPx < 70 ? "#00ff88" : (errPx < 130 ? "#ffaa00" : "#ff4466");
       dctx.lineWidth = 3;
       dctx.stroke();
 
@@ -1009,8 +1117,8 @@ INDEX_HTML = """<!DOCTYPE html>
       const by = rect.top + rect.height / 2;
       const dist = Math.hypot(gx - bx, gy - by);
 
-      // Hit threshold radius ~75 px
-      if (dist < 75) {
+      // Hit threshold radius ~80 px
+      if (dist < 80) {
         bubble.classList.add("dwell-active");
         if (currentDwellTarget !== bubble) {
           currentDwellTarget = bubble;
@@ -1069,7 +1177,7 @@ INDEX_HTML = """<!DOCTYPE html>
       dctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
       targets = [{ name: "Screen Center", x: 0.5, y: 0.5 }];
       document.getElementById("hud-mode-tag").innerText = "1-PT CALIB";
-      document.getElementById("banner").innerHTML = "Look at the center dot, then press <span class='kbd-key'>SPACEBAR</span>.";
+      document.getElementById("banner").innerHTML = "Look at the center yellow dot, then press <span class='kbd-key'>SPACEBAR</span>.";
       setTarget(0);
     }
 
@@ -1085,7 +1193,7 @@ INDEX_HTML = """<!DOCTYPE html>
         { name: "Bottom-Right", x: 0.85, y: 0.85 }
       ];
       document.getElementById("hud-mode-tag").innerText = "5-PT CALIB";
-      document.getElementById("banner").innerHTML = "Look at each dot, then press <span class='kbd-key'>SPACEBAR</span> to capture.";
+      document.getElementById("banner").innerHTML = "Look at each yellow dot, then press <span class='kbd-key'>SPACEBAR</span> to capture.";
       setTarget(0);
     }
 
@@ -1105,7 +1213,7 @@ INDEX_HTML = """<!DOCTYPE html>
         { name: "Left-Center", x: 0.15, y: 0.5 }
       ];
       document.getElementById("hud-mode-tag").innerText = "9-PT CALIB";
-      document.getElementById("banner").innerHTML = "Look at each dot, then press <span class='kbd-key'>SPACEBAR</span> to capture.";
+      document.getElementById("banner").innerHTML = "Look at each yellow dot, then press <span class='kbd-key'>SPACEBAR</span> to capture.";
       setTarget(0);
     }
 
@@ -1283,6 +1391,8 @@ class EyeMouseHTTPRequestHandler(BaseHTTPRequestHandler):
                     "right_y": round(r_norm.iris_y, 4),
                     "left_openness": round(l_norm.openness, 4),
                     "right_openness": round(r_norm.openness, 4),
+                    "left_iris_px": [round(output.eye_metrics.left_iris_center.x, 1), round(output.eye_metrics.left_iris_center.y, 1)],
+                    "right_iris_px": [round(output.eye_metrics.right_iris_center.x, 1), round(output.eye_metrics.right_iris_center.y, 1)],
                 }
 
             if output.head_pose:
@@ -1299,7 +1409,7 @@ class EyeMouseHTTPRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_adapt_point(self, payload: Dict[str, Any]) -> None:
         p = get_pipeline()
-        features = payload.get("features", [0.5, 0.5, 0.5, 0.5, 0.0, 0.0, 0.0])
+        features = payload.get("features", [0.5, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0])
         tx = float(payload.get("target_norm_x", 0.5))
         ty = float(payload.get("target_norm_y", 0.5))
         weight = float(payload.get("weight", 1.0))

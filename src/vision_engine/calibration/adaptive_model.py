@@ -36,8 +36,8 @@ def get_base_prior_weights() -> np.ndarray:
     
     Terms:
     0:  1.0 (intercept / bias)
-    1:  avg_x = (lx + rx) / 2.0 - 0.50 (horizontal conjugate iris)
-    2:  avg_y = (ly + ry) / 2.0 - 0.50 (vertical conjugate iris)
+    1:  avg_x = (lx + rx) / 2.0 - 0.50 (horizontal conjugate iris centered at 0.0)
+    2:  avg_y = (ly + ry) / 2.0 (vertical conjugate iris centered at 0.0)
     3:  disp_x = rx - lx (disparity)
     4:  yaw = head_yaw / 30.0 (horizontal head rotation)
     5:  pitch = head_pitch / 25.0 (vertical head pitch)
@@ -52,13 +52,13 @@ def get_base_prior_weights() -> np.ndarray:
     # Output u (horizontal [0, 1])
     W0[0, 0] = 0.50       # Screen center intercept
     W0[1, 0] = 3.20       # Eye movement horizontal sensitivity
-    W0[4, 0] = 0.40       # Head yaw contribution
-    W0[9, 0] = 0.15       # Head-eye coupling
+    W0[4, 0] = -0.40      # Head yaw contribution (left turn -> negative u shift)
+    W0[9, 0] = -0.15      # Head-eye coupling
 
     # Output v (vertical [0, 1])
     W0[0, 1] = 0.50       # Screen center intercept
     W0[2, 1] = 5.00       # Eye movement vertical sensitivity
-    W0[5, 1] = -0.50      # Head pitch contribution (camera above screen)
+    W0[5, 1] = -0.50      # Head pitch contribution (upward pitch -> negative v shift)
     W0[8, 1] = 0.30       # Downward foreshortening curvature
     W0[10, 1] = -0.15     # Head-eye pitch coupling
     return W0
@@ -134,7 +134,7 @@ class AdaptiveGazeModel(BaseGazeModel):
         roll = X_arr[:, 6:7] / 20.0
 
         avg_x = (lx + rx) / 2.0 - 0.50
-        avg_y = (ly + ry) / 2.0 - 0.50
+        avg_y = (ly + ry) / 2.0
         disp_x = rx - lx
 
         terms = [

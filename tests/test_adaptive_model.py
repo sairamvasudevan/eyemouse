@@ -41,19 +41,19 @@ def test_adaptive_model_base_prior_prediction():
     assert model.adaptation_points_count == 0
 
     # Resting eye features at neutral center:
-    # lx=0.5, ly=0.5, rx=0.5, ry=0.5, yaw=0, pitch=0, roll=0
-    resting_feats = np.array([0.5, 0.5, 0.5, 0.5, 0.0, 0.0, 0.0])
+    # lx=0.5, ly=0.0, rx=0.5, ry=0.0, yaw=0, pitch=0, roll=0
+    resting_feats = np.array([0.5, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0])
     u, v = model.predict(resting_feats)[0]
     assert abs(u - 0.5) < 0.05
     assert abs(v - 0.5) < 0.05
 
     # Look right: iris moves in +x direction in camera frame
-    look_right_feats = np.array([0.58, 0.5, 0.58, 0.5, 0.0, 0.0, 0.0])
+    look_right_feats = np.array([0.58, 0.0, 0.58, 0.0, 0.0, 0.0, 0.0])
     u_right, v_right = model.predict(look_right_feats)[0]
     assert u_right > u
 
     # Look down: iris moves in +y direction
-    look_down_feats = np.array([0.5, 0.58, 0.5, 0.58, 0.0, 0.0, 0.0])
+    look_down_feats = np.array([0.5, 0.08, 0.5, 0.08, 0.0, 0.0, 0.0])
     u_down, v_down = model.predict(look_down_feats)[0]
     assert v_down > v
 
@@ -63,8 +63,8 @@ def test_single_point_center_adaptation():
     model = AdaptiveGazeModel()
 
     # Suppose user's physical resting eye position has a slight offset:
-    # lx=0.48, ly=0.52, rx=0.49, ry=0.53, yaw=2.0 deg, pitch=-1.5 deg
-    user_resting_feats = np.array([0.48, 0.52, 0.49, 0.53, 2.0, -1.5, 0.5])
+    # lx=0.48, ly=0.02, rx=0.49, ry=0.03, yaw=2.0 deg, pitch=-1.5 deg
+    user_resting_feats = np.array([0.48, 0.02, 0.49, 0.03, 2.0, -1.5, 0.5])
 
     # Before adaptation, base model has a small bias error:
     u_pre, v_pre = model.predict(user_resting_feats)[0]
@@ -86,11 +86,11 @@ def test_multi_point_online_rls_updates():
 
     # User fixates 5 targets
     targets = [
-        (np.array([0.50, 0.50, 0.50, 0.50, 0.0, 0.0, 0.0]), 0.5, 0.5),      # Center
-        (np.array([0.42, 0.42, 0.42, 0.42, -5.0, 4.0, 0.0]), 0.1, 0.1),   # Top-Left
-        (np.array([0.58, 0.42, 0.58, 0.42, 5.0, 4.0, 0.0]), 0.9, 0.1),    # Top-Right
-        (np.array([0.42, 0.58, 0.42, 0.58, -5.0, -4.0, 0.0]), 0.1, 0.9),   # Bottom-Left
-        (np.array([0.58, 0.58, 0.58, 0.58, 5.0, -4.0, 0.0]), 0.9, 0.9),    # Bottom-Right
+        (np.array([0.50, 0.00, 0.50, 0.00, 0.0, 0.0, 0.0]), 0.5, 0.5),      # Center
+        (np.array([0.38, -0.08, 0.38, -0.08, 4.0, 4.0, 0.0]), 0.1, 0.1),   # Top-Left
+        (np.array([0.62, -0.08, 0.62, -0.08, -4.0, 4.0, 0.0]), 0.9, 0.1),   # Top-Right
+        (np.array([0.38, 0.08, 0.38, 0.08, 4.0, -4.0, 0.0]), 0.1, 0.9),    # Bottom-Left
+        (np.array([0.62, 0.08, 0.62, 0.08, -4.0, -4.0, 0.0]), 0.9, 0.9),   # Bottom-Right
     ]
 
     import time
@@ -113,7 +113,7 @@ def test_multi_point_online_rls_updates():
 
 def test_serialization_and_deserialization():
     model = AdaptiveGazeModel()
-    user_feats = np.array([0.47, 0.53, 0.48, 0.54, 1.0, -1.0, 0.0])
+    user_feats = np.array([0.47, 0.03, 0.48, 0.04, 1.0, -1.0, 0.0])
     model.adapt_point(user_feats, 0.5, 0.5)
 
     d = model.to_dict()
@@ -141,7 +141,7 @@ def test_serialization_and_deserialization():
 
 def test_profile_instantiation_with_adaptive_model():
     model = AdaptiveGazeModel()
-    feats = np.array([0.48, 0.52, 0.48, 0.52, 0.0, 0.0, 0.0])
+    feats = np.array([0.48, 0.02, 0.48, 0.02, 0.0, 0.0, 0.0])
     model.adapt_point(feats, 0.5, 0.5)
 
     profile = CalibrationProfile(
@@ -170,12 +170,12 @@ def test_profile_instantiation_with_adaptive_model():
         left_corner_inner=Point2D(90, 100),
         left_corner_outer=Point2D(110, 100),
         left_iris_center=Point2D(100, 100),
-        left_normalized=NormalizedEyeCoords(iris_x=0.48, iris_y=0.52, openness=0.8, ear=0.3),
+        left_normalized=NormalizedEyeCoords(iris_x=0.48, iris_y=0.02, openness=0.8, ear=0.3),
         right_corner_inner=Point2D(140, 100),
         right_corner_outer=Point2D(160, 100),
         right_iris_center=Point2D(150, 100),
-        right_normalized=NormalizedEyeCoords(iris_x=0.48, iris_y=0.52, openness=0.8, ear=0.3),
-        gaze_feature_vector=np.array([0.48, 0.52, 0.48, 0.52]),
+        right_normalized=NormalizedEyeCoords(iris_x=0.48, iris_y=0.02, openness=0.8, ear=0.3),
+        gaze_feature_vector=np.array([0.48, 0.02, 0.48, 0.02]),
     )
     head_pose = HeadPose(yaw=0.0, pitch=0.0, roll=0.0, tx=0.0, ty=0.0, tz=0.0)
 
