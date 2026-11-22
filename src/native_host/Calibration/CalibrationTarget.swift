@@ -128,5 +128,39 @@ public struct CalibrationTarget: Identifiable, Codable {
             CalibrationTarget(id: 31, name: "Val32-Bot-Edge-Right", normX: 0.94, normY: 0.80, isEdge: true),
         ]
     }
+    
+    public static func defaultOnePointGrid() -> [CalibrationTarget] {
+        return [
+            CalibrationTarget(id: 0, name: "Screen Center", normX: 0.5, normY: 0.5, isCenter: true)
+        ]
+    }
+    
+    public static func defaultFivePointGrid(margin: Double = 0.15) -> [CalibrationTarget] {
+        let m = margin
+        return [
+            CalibrationTarget(id: 0, name: "Screen Center", normX: 0.5, normY: 0.5, isCenter: true),
+            CalibrationTarget(id: 1, name: "Top-Left", normX: m, normY: m, isCorner: true),
+            CalibrationTarget(id: 2, name: "Top-Right", normX: 1.0 - m, normY: m, isCorner: true),
+            CalibrationTarget(id: 3, name: "Bottom-Left", normX: m, normY: 1.0 - m, isCorner: true),
+            CalibrationTarget(id: 4, name: "Bottom-Right", normX: 1.0 - m, normY: 1.0 - m, isCorner: true),
+        ]
+    }
+    
+    public static func defaultNinePointGrid(margin: Double = 0.12) -> [CalibrationTarget] {
+        let m = margin
+        let cx = 0.5
+        let cy = 0.5
+        return [
+            CalibrationTarget(id: 0, name: "Screen Center", normX: cx, normY: cy, isCenter: true),
+            CalibrationTarget(id: 1, name: "Top-Left", normX: m, normY: m, isCorner: true),
+            CalibrationTarget(id: 2, name: "Top-Center", normX: cx, normY: m, isEdge: true),
+            CalibrationTarget(id: 3, name: "Top-Right", normX: 1.0 - m, normY: m, isCorner: true),
+            CalibrationTarget(id: 4, name: "Right-Center", normX: 1.0 - m, normY: cy, isEdge: true),
+            CalibrationTarget(id: 5, name: "Bottom-Right", normX: 1.0 - m, normY: 1.0 - m, isCorner: true),
+            CalibrationTarget(id: 6, name: "Bottom-Center", normX: cx, normY: 1.0 - m, isEdge: true),
+            CalibrationTarget(id: 7, name: "Bottom-Left", normX: m, normY: 1.0 - m, isCorner: true),
+            CalibrationTarget(id: 8, name: "Left-Center", normX: m, normY: cy, isEdge: true),
+        ]
+    }
 }
 

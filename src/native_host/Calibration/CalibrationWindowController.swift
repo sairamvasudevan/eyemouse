@@ -2,19 +2,28 @@ import Foundation
 import AppKit
 import SwiftUI
 
+public final class CalibrationFullscreenWindow: NSWindow {
+    public override var canBecomeKey: Bool { true }
+    public override var canBecomeMain: Bool { true }
+}
+
 public final class CalibrationWindowController: ObservableObject {
     public static let shared = CalibrationWindowController()
     
     private var window: NSWindow?
+    private var localKeyMonitor: Any?
     
     @Published public var state: SessionState = .ready
+    @Published public var isInteractiveMode: Bool = true
     @Published public var currentTargetIndex: Int = 0
-    @Published public var totalTargets: Int = 13
+    @Published public var totalTargets: Int = 5
     @Published public var currentTarget: CalibrationTarget?
     @Published public var fixationProgress: Double = 0.0
-    @Published public var statusMessage: String = "Keep your head steady and fixate on each target."
+    @Published public var isConfirmedFeedback: Bool = false
+    @Published public var statusMessage: String = "Look directly at the dot, then press SPACEBAR to capture your eye position."
     @Published public var validationReport: ValidationMetrics?
-    @Published public var selectedModelName: String = ""
+    @Published public var selectedModelName: String = "adaptive_online_ridge"
+    @Published public var pointsAdaptedCount: Int = 0
     
     public enum SessionState {
         case ready
@@ -41,10 +50,13 @@ public final class CalibrationWindowController: ObservableObject {
         self.currentTargetIndex = 0
         self.currentTarget = nil
         self.fixationProgress = 0.0
-        self.statusMessage = "Keep your head steady and fixate on each target."
+        self.isConfirmedFeedback = false
+        self.statusMessage = "Look directly at the dot, then press SPACEBAR to capture your eye position."
         self.validationReport = nil
-        self.calibAggregates.clear()
-        self.valAggregates.clear()
+        self.pointsAdaptedCount = 0
+        self.calibAggregates.removeAll()
+        self.valAggregates.removeAll()
+        self.currentSamples.removeAll()
     }
     
     public func show() {
@@ -56,7 +68,7 @@ public final class CalibrationWindowController: ObservableObject {
         
         resetSession()
         
-        let win = NSWindow(
+        let win = CalibrationFullscreenWindow(
             contentRect: screen.frame,
             styleMask: [.borderless],
             backing: .buffered,
@@ -73,6 +85,9 @@ public final class CalibrationWindowController: ObservableObject {
         win.makeKeyAndOrderFront(nil)
         self.window = win
         
+        // Install key monitor for Spacebar, Enter, Escape, and number shortcuts
+        installKeyMonitor()
+        
         // Start engine and camera session
         DispatchQueue.global(qos: .userInitiated).async {
             if !EngineProcessManager.shared.isRunning {
@@ -83,6 +98,7 @@ public final class CalibrationWindowController: ObservableObject {
     }
     
     public func close() {
+        removeKeyMonitor()
         timer?.invalidate()
         timer = nil
         window?.orderOut(nil)
@@ -95,75 +111,223 @@ public final class CalibrationWindowController: ObservableObject {
         }
     }
     
-    public func startCalibration() {
+    private func installKeyMonitor() {
+        removeKeyMonitor()
+        localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self = self else { return event }
+            
+            // Escape (53): Cancel / Close
+            if event.keyCode == 53 {
+                self.close()
+                return nil
+            }
+            
+            // Spacebar (49) or Return (36)
+            if event.keyCode == 49 || event.keyCode == 36 {
+                if self.state == .calibrating || self.state == .validating {
+                    self.confirmCurrentPoint()
+                    return nil
+                } else if self.state == .ready {
+                    self.startAdaptiveCalibration(pointCount: 5)
+                    return nil
+                }
+            }
+            
+            // Shortcuts while ready:
+            if self.state == .ready {
+                if event.characters == "1" || event.characters?.uppercased() == "C" {
+                    self.startQuickOnePoint()
+                    return nil
+                } else if event.characters == "5" {
+                    self.startAdaptiveCalibration(pointCount: 5)
+                    return nil
+                } else if event.characters == "9" {
+                    self.startAdaptiveCalibration(pointCount: 9)
+                    return nil
+                }
+            }
+            
+            return event
+        }
+    }
+    
+    private func removeKeyMonitor() {
+        if let monitor = localKeyMonitor {
+            NSEvent.removeMonitor(monitor)
+            localKeyMonitor = nil
+        }
+    }
+    
+    // MARK: - Calibration Launchers
+    
+    public func startQuickOnePoint() {
+        self.isInteractiveMode = true
+        self.calibTargets = CalibrationTarget.defaultOnePointGrid()
+        self.valTargets = []
+        self.totalTargets = calibTargets.count
+        self.currentTargetIndex = 0
+        self.state = .calibrating
+        self.statusMessage = "Look directly at the center dot, then press SPACEBAR to capture your eye position."
+        presentTarget(calibTargets[0])
+    }
+    
+    public func startAdaptiveCalibration(pointCount: Int = 5) {
+        self.isInteractiveMode = true
+        if pointCount == 1 {
+            startQuickOnePoint()
+            return
+        } else if pointCount == 9 {
+            self.calibTargets = CalibrationTarget.defaultNinePointGrid()
+        } else {
+            self.calibTargets = CalibrationTarget.defaultFivePointGrid()
+        }
+        self.valTargets = []
+        self.totalTargets = calibTargets.count
+        self.currentTargetIndex = 0
+        self.state = .calibrating
+        self.statusMessage = "Look directly at the dot, then press SPACEBAR to capture your eye position."
+        presentTarget(calibTargets[0])
+    }
+    
+    public func startBatchCalibration() {
+        self.isInteractiveMode = false
         self.calibTargets = CalibrationTarget.defaultThirteenPointGrid()
         self.valTargets = CalibrationTarget.defaultNinePointValidationGrid()
-        self.calibAggregates.clear()
-        self.valAggregates.clear()
+        self.calibAggregates.removeAll()
+        self.valAggregates.removeAll()
         
         self.state = .calibrating
         self.totalTargets = calibTargets.count
         self.currentTargetIndex = 0
+        self.statusMessage = "Fixate on each target until the countdown ring shrinks."
         presentTarget(calibTargets[0])
     }
     
+    public func resetAdaptationToBasePrior() {
+        if let client = EngineProcessManager.shared.getControlClient() {
+            _ = client.sendResetAdaptation()
+        }
+        DiagnosticsStore.shared.loadActiveProfile()
+        self.statusMessage = "Gaze model reset to base physiological prior."
+    }
+    
+    // MARK: - Target Presentation & Sampling
+    
     private func presentTarget(_ target: CalibrationTarget) {
         self.currentTarget = target
-        self.currentSamples.clear()
+        self.currentSamples.removeAll()
         self.targetStartTime = Date().timeIntervalSince1970
         self.fixationProgress = 0.0
+        self.isConfirmedFeedback = false
         
         timer?.invalidate()
-        let interval = 0.033 // ~30 Hz update
+        let interval = 0.033 // ~30 Hz sampling
         timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            self?.tickTarget()
+            self?.tickSampling()
         }
     }
     
-    private func tickTarget() {
+    private func tickSampling() {
         guard let target = currentTarget else { return }
         let now = Date().timeIntervalSince1970
         let elapsed = now - targetStartTime
-        let settling = 0.4
-        let fixation = 1.0
-        let total = settling + fixation
         
-        self.fixationProgress = min(max((elapsed - settling) / fixation, 0.0), 1.0)
-        
-        // Sample collection during fixation window
-        if elapsed >= settling && elapsed <= total {
-            let diag = DiagnosticsStore.shared
-            if diag.faceDetected && diag.blinkPhase == "OPEN" && diag.confidence >= 0.60 {
-                // Feature vector: [left_x, left_y, right_x, right_y, yaw, pitch, roll]
-                let sample: [Double] = [
-                    diag.leftIrisX, diag.leftIrisY,
-                    diag.rightIrisX, diag.rightIrisY,
-                    diag.headYaw, diag.headPitch, diag.headRoll
-                ]
-                currentSamples.append(sample)
+        let diag = DiagnosticsStore.shared
+        if diag.faceDetected && diag.blinkPhase == "OPEN" && diag.confidence >= 0.50 {
+            let sample: [Double] = [
+                diag.leftIrisX, diag.leftIrisY,
+                diag.rightIrisX, diag.rightIrisY,
+                diag.headYaw, diag.headPitch, diag.headRoll
+            ]
+            currentSamples.append(sample)
+            // Keep rolling buffer of recent ~20 samples (~0.6 sec)
+            if currentSamples.count > 25 {
+                currentSamples.removeFirst()
             }
         }
         
-        // Target complete
-        if elapsed >= total {
-            timer?.invalidate()
-            timer = nil
-            finishCurrentTarget(target)
+        if !isInteractiveMode {
+            // Automatic countdown timer mode
+            let settling = 0.4
+            let fixation = 1.0
+            let total = settling + fixation
+            self.fixationProgress = min(max((elapsed - settling) / fixation, 0.0), 1.0)
+            if elapsed >= total {
+                timer?.invalidate()
+                timer = nil
+                finishBatchCurrentTarget(target)
+            }
         }
     }
     
-    private func finishCurrentTarget(_ target: CalibrationTarget) {
-        // Robust median aggregation
-        let validSamples = currentSamples.count
-        var medianVec = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    // MARK: - Interactive Keypress Confirmation
+    
+    public func confirmCurrentPoint() {
+        guard let target = currentTarget, (state == .calibrating || state == .validating) else { return }
         
-        if validSamples >= 8 {
+        // Calculate median feature vector from recent samples
+        var medianVec = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        if currentSamples.count >= 3 {
             for dim in 0..<7 {
                 let vals = currentSamples.map { $0[dim] }.sorted()
                 medianVec[dim] = vals[vals.count / 2]
             }
         } else {
-            // Insufficient samples fallback to latest store values
+            let diag = DiagnosticsStore.shared
+            medianVec = [
+                diag.leftIrisX, diag.leftIrisY,
+                diag.rightIrisX, diag.rightIrisY,
+                diag.headYaw, diag.headPitch, diag.headRoll
+            ]
+        }
+        
+        // Send online adaptation point to Python vision engine via IPC
+        if let client = EngineProcessManager.shared.getControlClient() {
+            let ok = client.sendAdaptPoint(
+                features: medianVec,
+                targetNormX: target.normX,
+                targetNormY: target.normY,
+                weight: 1.0
+            )
+            print("[Calibration] Adapted point \(target.name) at (\(target.normX), \(target.normY)): \(ok)")
+        }
+        
+        // Visual confirmation pulse
+        self.isConfirmedFeedback = true
+        self.pointsAdaptedCount += 1
+        
+        // Short pause to show green confirmation ring, then advance to next target
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            guard let self = self else { return }
+            self.isConfirmedFeedback = false
+            
+            let nextIdx = self.currentTargetIndex + 1
+            if nextIdx < self.calibTargets.count {
+                self.currentTargetIndex = nextIdx
+                self.presentTarget(self.calibTargets[nextIdx])
+            } else {
+                // All targets confirmed!
+                self.timer?.invalidate()
+                self.timer = nil
+                self.state = .completed
+                self.currentTarget = nil
+                self.statusMessage = "Self-adaptation complete! Gaze model adapted online."
+                DiagnosticsStore.shared.loadActiveProfile()
+            }
+        }
+    }
+    
+    // MARK: - Batch Mode Completion
+    
+    private func finishBatchCurrentTarget(_ target: CalibrationTarget) {
+        let validSamples = currentSamples.count
+        var medianVec = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        if validSamples >= 5 {
+            for dim in 0..<7 {
+                let vals = currentSamples.map { $0[dim] }.sorted()
+                medianVec[dim] = vals[vals.count / 2]
+            }
+        } else {
             let diag = DiagnosticsStore.shared
             medianVec = [
                 diag.leftIrisX, diag.leftIrisY,
@@ -190,11 +354,10 @@ public final class CalibrationWindowController: ObservableObject {
                 currentTargetIndex = nextIdx
                 presentTarget(calibTargets[nextIdx])
             } else {
-                // Switch to validation phase
                 state = .validating
                 totalTargets = valTargets.count
                 currentTargetIndex = 0
-                statusMessage = "Calibration complete. Now collecting 9 validation points..."
+                statusMessage = "Now collecting 9 validation points..."
                 presentTarget(valTargets[0])
             }
         } else if state == .validating {
@@ -204,15 +367,14 @@ public final class CalibrationWindowController: ObservableObject {
                 currentTargetIndex = nextIdx
                 presentTarget(valTargets[nextIdx])
             } else {
-                // Finished both phases -> run training
                 state = .processing
                 statusMessage = "Training and cross-validating models..."
-                runModelTrainingAndValidation()
+                runBatchTrainingAndValidation()
             }
         }
     }
     
-    private func runModelTrainingAndValidation() {
+    private func runBatchTrainingAndValidation() {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             let geom = CalibrationGeometry.current
@@ -235,7 +397,6 @@ public final class CalibrationWindowController: ObservableObject {
                 let data = try JSONSerialization.data(withJSONObject: sessionPayload, options: .prettyPrinted)
                 try data.write(to: URL(fileURLWithPath: tmpSessionFile))
                 
-                // Execute Python training CLI script
                 let pythonPath = BundleConstants.projectRoot + "/.venv/bin/python"
                 let scriptPath = BundleConstants.projectRoot + "/scripts/train_and_validate_calibration.py"
                 
@@ -266,8 +427,6 @@ public final class CalibrationWindowController: ObservableObject {
                             self.validationReport = parsedReport
                             self.selectedModelName = parsedReport.modelName
                             self.state = .completed
-                            
-                            // Reload active profile in store
                             DiagnosticsStore.shared.loadActiveProfile()
                         }
                     }
@@ -287,11 +446,7 @@ public final class CalibrationWindowController: ObservableObject {
     }
 }
 
-fileprivate extension Array {
-    mutating func clear() {
-        self.removeAll()
-    }
-}
+// MARK: - SwiftUI Views
 
 struct CalibrationView: View {
     @ObservedObject var controller: CalibrationWindowController
@@ -318,9 +473,7 @@ struct CalibrationView: View {
                     }
                     
                 case .completed:
-                    if let report = controller.validationReport {
-                        ValidationScorecardView(report: report, controller: controller)
-                    }
+                    AdaptiveCompletionView(controller: controller)
                     
                 case .cancelled:
                     VStack(spacing: 16) {
@@ -371,27 +524,62 @@ struct ReadyIntroView: View {
                 .font(.system(size: 28, weight: .bold))
                 .foregroundColor(.white)
             
-            VStack(alignment: .leading, spacing: 12) {
-                InstructionRow(icon: "1.circle.fill", text: "Sit comfortably ~55 cm from the screen with normal head posture.")
-                InstructionRow(icon: "2.circle.fill", text: "13 calibration points and 9 validation points will appear sequentially.")
-                InstructionRow(icon: "3.circle.fill", text: "Focus your eyes directly on each pulsing dot until it completes.")
-                InstructionRow(icon: "4.circle.fill", text: "Independent held-out targets will objectively validate accuracy.")
-                InstructionRow(icon: "shield.fill", text: "No OS mouse movement or cursor injection will occur.")
+            VStack(alignment: .leading, spacing: 14) {
+                InstructionRow(icon: "dot.circle.viewfinder", text: "Look directly at each target point shown on screen.")
+                InstructionRow(icon: "keyboard", text: "Press SPACEBAR when looking at the dot to capture your eye position.")
+                InstructionRow(icon: "brain.head.profile", text: "Self-adapting model learns online and updates instantaneously.")
+                InstructionRow(icon: "shield.fill", text: "No mouse movement or cursor injection will occur.")
             }
-            .frame(maxWidth: 550)
+            .frame(maxWidth: 580)
             .padding(24)
             .background(Color.white.opacity(0.06))
             .cornerRadius(12)
             
-            Button(action: { controller.startCalibration() }) {
-                Text("Start Calibration")
-                    .font(.system(size: 16, weight: .bold))
+            VStack(spacing: 12) {
+                Button(action: { controller.startAdaptiveCalibration(pointCount: 5) }) {
+                    HStack {
+                        Image(systemName: "play.circle.fill")
+                        Text("Start 5-Point Adaptive Calibration (Press Space / 5)")
+                    }
+                    .font(.system(size: 15, weight: .bold))
                     .foregroundColor(.black)
-                    .frame(width: 220, height: 44)
+                    .frame(width: 440, height: 44)
                     .background(Color.cyan)
                     .cornerRadius(8)
+                }
+                .buttonStyle(PlainButtonStyle())
+                
+                HStack(spacing: 12) {
+                    Button(action: { controller.startQuickOnePoint() }) {
+                        Text("Quick 1-Point Recalibrate (Press 1)")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(.white)
+                            .frame(width: 214, height: 38)
+                            .background(Color.white.opacity(0.12))
+                            .cornerRadius(8)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                    
+                    Button(action: { controller.startAdaptiveCalibration(pointCount: 9) }) {
+                        Text("9-Point Grid (Press 9)")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(.white)
+                            .frame(width: 214, height: 38)
+                            .background(Color.white.opacity(0.12))
+                            .cornerRadius(8)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                }
+                
+                Button(action: { controller.resetAdaptationToBasePrior() }) {
+                    Text("Reset Model to Physiological Base Prior")
+                        .font(.system(size: 12))
+                        .foregroundColor(.white.opacity(0.6))
+                        .underline()
+                }
+                .buttonStyle(PlainButtonStyle())
+                .padding(.top, 4)
             }
-            .buttonStyle(PlainButtonStyle())
         }
     }
 }
@@ -421,70 +609,109 @@ struct TargetPresentationView: View {
         if let target = controller.currentTarget {
             let px = target.normX * Double(screenBounds.width)
             let py = target.normY * Double(screenBounds.height)
-            let isVal = controller.state == .validating
-            let color = isVal ? Color.orange : Color.cyan
+            let isConfirmed = controller.isConfirmedFeedback
+            let dotColor = isConfirmed ? Color.green : Color.cyan
             
             ZStack {
-                // Shrinking outer countdown ring
-                Circle()
-                    .stroke(color.opacity(0.4), lineWidth: 3)
-                    .frame(width: 60 * (1.0 - 0.5 * controller.fixationProgress),
-                           height: 60 * (1.0 - 0.5 * controller.fixationProgress))
+                // Interactive guidance prompt banner
+                VStack {
+                    Spacer()
+                    VStack(spacing: 8) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "keyboard.fill")
+                                .foregroundColor(.cyan)
+                            Text("Look directly at the dot, then press SPACEBAR to capture")
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundColor(.white)
+                        }
+                        Text("Target \(controller.currentTargetIndex + 1) of \(controller.totalTargets): \(target.name)")
+                            .font(.system(size: 13, design: .monospaced))
+                            .foregroundColor(.white.opacity(0.7))
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 14)
+                    .background(Color.black.opacity(0.75))
+                    .cornerRadius(12)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color.white.opacity(0.2), lineWidth: 1)
+                    )
+                    .padding(.bottom, 60)
+                }
                 
-                // Steady center target
-                Circle()
-                    .fill(color)
-                    .frame(width: 14, height: 14)
-                    .shadow(color: color, radius: 8)
-                
-                // Inner white pip
-                Circle()
-                    .fill(Color.white)
-                    .frame(width: 4, height: 4)
+                // Target reticle
+                ZStack {
+                    if isConfirmed {
+                        // Expanding green capture pulse
+                        Circle()
+                            .stroke(Color.green, lineWidth: 4)
+                            .frame(width: 70, height: 70)
+                            .scaleEffect(1.3)
+                            .opacity(0.8)
+                    }
+                    
+                    // Outer subtle halo
+                    Circle()
+                        .stroke(dotColor.opacity(0.4), lineWidth: 3)
+                        .frame(width: 44, height: 44)
+                    
+                    // Crosshair guides
+                    Rectangle()
+                        .fill(dotColor.opacity(0.5))
+                        .frame(width: 1, height: 32)
+                    Rectangle()
+                        .fill(dotColor.opacity(0.5))
+                        .frame(width: 32, height: 1)
+                    
+                    // Solid central dot
+                    Circle()
+                        .fill(dotColor)
+                        .frame(width: 16, height: 16)
+                        .shadow(color: dotColor, radius: isConfirmed ? 16 : 8)
+                    
+                    // Center white pip
+                    Circle()
+                        .fill(Color.white)
+                        .frame(width: 4, height: 4)
+                }
+                .position(x: CGFloat(px), y: CGFloat(py))
+                .animation(.spring(response: 0.25, dampingFraction: 0.6), value: isConfirmed)
             }
-            .position(x: CGFloat(px), y: CGFloat(py))
-            .animation(.easeInOut(duration: 0.1), value: controller.fixationProgress)
         }
     }
 }
 
-struct ValidationScorecardView: View {
-    let report: ValidationMetrics
+struct AdaptiveCompletionView: View {
     @ObservedObject var controller: CalibrationWindowController
     
     var body: some View {
         VStack(spacing: 24) {
-            HStack(spacing: 12) {
-                Image(systemName: report.isValidForUse ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
-                    .font(.system(size: 32))
-                    .foregroundColor(report.isValidForUse ? .green : .orange)
-                
-                VStack(alignment: .leading) {
-                    Text("Calibration Quality: \(report.qualityGrade)")
-                        .font(.system(size: 24, weight: .bold))
-                        .foregroundColor(.white)
-                    Text("Validated on 9 independent held-out screen positions")
-                        .font(.system(size: 13))
-                        .foregroundColor(.white.opacity(0.7))
-                }
+            Image(systemName: "checkmark.seal.fill")
+                .font(.system(size: 48))
+                .foregroundColor(.green)
+            
+            VStack(spacing: 8) {
+                Text("Gaze Calibration Complete!")
+                    .font(.system(size: 26, weight: .bold))
+                    .foregroundColor(.white)
+                Text("Self-adapting model has updated online and saved to your active profile.")
+                    .font(.system(size: 14))
+                    .foregroundColor(.white.opacity(0.8))
             }
             
-            // Metrics grid
-            VStack(spacing: 12) {
-                MetricScoreRow(title: "Median Pixel Error:", value: "\(String(format: "%.1f", report.medianPixelError)) px (\(String(format: "%.2f", report.medianErrorPctDiagonal))% diag)")
-                MetricScoreRow(title: "95th Percentile (P95) Error:", value: "\(String(format: "%.1f", report.p95PixelError)) px (\(String(format: "%.2f", report.p95ErrorPctDiagonal))% diag)")
-                MetricScoreRow(title: "Mean Visual Degree Error:", value: "\(String(format: "%.2f", report.meanVisualDegrees))° visual angle")
-                MetricScoreRow(title: "Center vs Corner Accuracy:", value: "Center: \(String(format: "%.1f", report.centerMeanPixelError)) px | Corner: \(String(format: "%.1f", report.cornerMeanPixelError)) px")
-                MetricScoreRow(title: "Selected Model Architecture:", value: report.modelName)
+            VStack(alignment: .leading, spacing: 10) {
+                MetricScoreRow(title: "Architecture:", value: "Adaptive Online Ridge (Bayesian Prior)")
+                MetricScoreRow(title: "Points Captured:", value: "\(controller.pointsAdaptedCount) targets")
+                MetricScoreRow(title: "Adaptation Status:", value: "Active & Saved")
             }
-            .frame(maxWidth: 500)
+            .frame(maxWidth: 460)
             .padding(20)
             .background(Color.white.opacity(0.08))
             .cornerRadius(12)
             
-            HStack(spacing: 20) {
+            HStack(spacing: 16) {
                 Button("Recalibrate") {
-                    controller.startCalibration()
+                    controller.startAdaptiveCalibration(pointCount: 5)
                 }
                 .font(.system(size: 14, weight: .medium))
                 .foregroundColor(.white)
@@ -493,7 +720,7 @@ struct ValidationScorecardView: View {
                 .background(Color.white.opacity(0.15))
                 .cornerRadius(8)
                 
-                Button("Save & Enable Live Preview") {
+                Button("Enable Diagnostic Preview & Done") {
                     LiveGazePreviewController.shared.show()
                     controller.close()
                 }

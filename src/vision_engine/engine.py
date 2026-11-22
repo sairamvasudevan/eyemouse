@@ -95,6 +95,43 @@ class VisionEngine:
                     "status": "CALIBRATION_LOADED" if success else "CALIBRATION_ERROR",
                     "is_calibrated": self.pipeline.gaze_estimator.is_calibrated,
                 })
+            elif cmd == "ADAPT_POINT":
+                features = msg.get("features")
+                tx = float(msg.get("target_norm_x", 0.5))
+                ty = float(msg.get("target_norm_y", 0.5))
+                weight = float(msg.get("weight", 1.0))
+                try:
+                    pred_u, pred_v = self.pipeline.adapt_calibration_point(
+                        features=features,
+                        target_norm_x=tx,
+                        target_norm_y=ty,
+                        weight=weight,
+                    )
+                    self.control_server.send_message({
+                        "status": "POINT_ADAPTED",
+                        "pred_x": round(pred_u, 4),
+                        "pred_y": round(pred_v, 4),
+                        "is_calibrated": self.pipeline.gaze_estimator.is_calibrated,
+                    })
+                except Exception as exc:
+                    log.error("Failed to adapt point: %s", exc)
+                    self.control_server.send_message({
+                        "status": "ADAPTATION_ERROR",
+                        "error": str(exc),
+                    })
+            elif cmd == "RESET_ADAPTATION":
+                try:
+                    self.pipeline.reset_adaptation()
+                    self.control_server.send_message({
+                        "status": "ADAPTATION_RESET",
+                        "is_calibrated": self.pipeline.gaze_estimator.is_calibrated,
+                    })
+                except Exception as exc:
+                    log.error("Failed to reset adaptation: %s", exc)
+                    self.control_server.send_message({
+                        "status": "ADAPTATION_ERROR",
+                        "error": str(exc),
+                    })
             elif cmd == "SHUTDOWN":
                 log.info("Received SHUTDOWN request from host.")
                 self.control_server.send_message({"status": "SHUTDOWN_ACK"})

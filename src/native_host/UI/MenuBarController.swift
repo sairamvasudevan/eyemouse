@@ -49,10 +49,34 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         
         menu.addItem(NSMenuItem.separator())
         
-        // 4. Calibration Wizard
-        let calibItem = NSMenuItem(title: "Calibrate Eye Tracking...", action: #selector(openCalibration), keyEquivalent: "c")
-        calibItem.target = self
-        menu.addItem(calibItem)
+        // 4. Calibration
+        let calibMenu = NSMenu(title: "Calibration")
+        let calibMainItem = NSMenuItem(title: "Gaze Calibration", action: nil, keyEquivalent: "")
+        calibMainItem.submenu = calibMenu
+        
+        let fivePointItem = NSMenuItem(title: "Interactive Calibration (5 Points)...", action: #selector(openFivePointCalibration), keyEquivalent: "c")
+        fivePointItem.target = self
+        calibMenu.addItem(fivePointItem)
+        
+        let onePointItem = NSMenuItem(title: "Quick 1-Point Recalibrate (Press Space)...", action: #selector(openOnePointCalibration), keyEquivalent: "1")
+        onePointItem.target = self
+        calibMenu.addItem(onePointItem)
+        
+        let ninePointItem = NSMenuItem(title: "Interactive Calibration (9 Points)...", action: #selector(openNinePointCalibration), keyEquivalent: "9")
+        ninePointItem.target = self
+        calibMenu.addItem(ninePointItem)
+        
+        calibMenu.addItem(NSMenuItem.separator())
+        
+        let resetPriorItem = NSMenuItem(title: "Reset Model to Base Prior", action: #selector(resetToBasePrior), keyEquivalent: "")
+        resetPriorItem.target = self
+        calibMenu.addItem(resetPriorItem)
+        
+        let batchWizardItem = NSMenuItem(title: "Batch 13-Point Validation Wizard...", action: #selector(openBatchCalibration), keyEquivalent: "")
+        batchWizardItem.target = self
+        calibMenu.addItem(batchWizardItem)
+        
+        menu.addItem(calibMainItem)
         
         // 5. Diagnostic Gaze Marker Overlay
         let previewItem = NSMenuItem(title: "Toggle Diagnostic Gaze Marker", action: #selector(toggleGazePreview), keyEquivalent: "m")
@@ -159,6 +183,34 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     @objc private func selectCameraDevice(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
         CameraManager.shared.selectDevice(byID: id)
+    }
+    
+    @objc private func openFivePointCalibration() {
+        CalibrationWindowController.shared.show()
+        CalibrationWindowController.shared.startAdaptiveCalibration(pointCount: 5)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+    
+    @objc private func openOnePointCalibration() {
+        CalibrationWindowController.shared.show()
+        CalibrationWindowController.shared.startQuickOnePoint()
+        NSApp.activate(ignoringOtherApps: true)
+    }
+    
+    @objc private func openNinePointCalibration() {
+        CalibrationWindowController.shared.show()
+        CalibrationWindowController.shared.startAdaptiveCalibration(pointCount: 9)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+    
+    @objc private func resetToBasePrior() {
+        CalibrationWindowController.shared.resetAdaptationToBasePrior()
+    }
+    
+    @objc private func openBatchCalibration() {
+        CalibrationWindowController.shared.show()
+        CalibrationWindowController.shared.startBatchCalibration()
+        NSApp.activate(ignoringOtherApps: true)
     }
     
     @objc private func openCalibration() {

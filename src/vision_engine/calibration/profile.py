@@ -49,6 +49,9 @@ class CalibrationProfile:
             return PolynomialGazeModel.from_dict(self.model_dict)
         elif self.model_name == "physically_informed_ridge":
             return PhysicallyInformedGazeModel.from_dict(self.model_dict)
+        elif self.model_name == "adaptive_online_ridge":
+            from .adaptive_model import AdaptiveGazeModel
+            return AdaptiveGazeModel.from_dict(self.model_dict)
         else:
             raise ValueError(f"Unknown model architecture: {self.model_name}")
 

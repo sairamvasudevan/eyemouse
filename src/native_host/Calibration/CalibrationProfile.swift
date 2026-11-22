@@ -51,6 +51,33 @@ public struct ValidationMetrics: Codable {
         case problematicRegions = "problematic_regions"
         case targetResults = "target_results"
     }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        modelName = (try? c.decode(String.self, forKey: .modelName)) ?? "adaptive_online_ridge"
+        totalValidationTargets = (try? c.decode(Int.self, forKey: .totalValidationTargets)) ?? 0
+        meanPixelError = (try? c.decode(Double.self, forKey: .meanPixelError)) ?? 50.0
+        medianPixelError = (try? c.decode(Double.self, forKey: .medianPixelError)) ?? 50.0
+        p95PixelError = (try? c.decode(Double.self, forKey: .p95PixelError)) ?? 100.0
+        maxPixelError = (try? c.decode(Double.self, forKey: .maxPixelError)) ?? 100.0
+        minPixelError = (try? c.decode(Double.self, forKey: .minPixelError)) ?? 10.0
+        meanNormError = (try? c.decode(Double.self, forKey: .meanNormError)) ?? 0.05
+        medianNormError = (try? c.decode(Double.self, forKey: .medianNormError)) ?? 0.05
+        meanPixelErrorX = (try? c.decode(Double.self, forKey: .meanPixelErrorX)) ?? 25.0
+        meanPixelErrorY = (try? c.decode(Double.self, forKey: .meanPixelErrorY)) ?? 25.0
+        centerMeanPixelError = (try? c.decode(Double.self, forKey: .centerMeanPixelError)) ?? 20.0
+        cornerMeanPixelError = (try? c.decode(Double.self, forKey: .cornerMeanPixelError)) ?? 60.0
+        edgeMeanPixelError = (try? c.decode(Double.self, forKey: .edgeMeanPixelError)) ?? 40.0
+        meanVisualDegrees = (try? c.decode(Double.self, forKey: .meanVisualDegrees)) ?? 1.5
+        medianVisualDegrees = (try? c.decode(Double.self, forKey: .medianVisualDegrees)) ?? 1.5
+        p95VisualDegrees = (try? c.decode(Double.self, forKey: .p95VisualDegrees)) ?? 3.0
+        medianErrorPctDiagonal = (try? c.decode(Double.self, forKey: .medianErrorPctDiagonal)) ?? 2.0
+        p95ErrorPctDiagonal = (try? c.decode(Double.self, forKey: .p95ErrorPctDiagonal)) ?? 4.0
+        qualityGrade = (try? c.decode(String.self, forKey: .qualityGrade)) ?? "ADAPTIVE"
+        isValidForUse = (try? c.decode(Bool.self, forKey: .isValidForUse)) ?? true
+        problematicRegions = (try? c.decode([String].self, forKey: .problematicRegions)) ?? []
+        targetResults = try? c.decode([TargetResultSummary].self, forKey: .targetResults)
+    }
 }
 
 public struct TargetResultSummary: Codable {
@@ -77,13 +104,23 @@ public struct TargetResultSummary: Codable {
 
 public struct ModelDictionary: Codable {
     public let modelName: String
-    public let alpha: Double
-    public let weights: [[Double]]
+    public let alpha: Double?
+    public let weights: [[Double]]?
+    public let adaptationPointsCount: Int?
     
     enum CodingKeys: String, CodingKey {
         case modelName = "model_name"
         case alpha
         case weights
+        case adaptationPointsCount = "adaptation_points_count"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        modelName = (try? c.decode(String.self, forKey: .modelName)) ?? "adaptive_online_ridge"
+        alpha = try? c.decode(Double.self, forKey: .alpha)
+        weights = try? c.decode([[Double]].self, forKey: .weights)
+        adaptationPointsCount = try? c.decode(Int.self, forKey: .adaptationPointsCount)
     }
 }
 

@@ -20,6 +20,12 @@ from .models import (
     solve_ridge_regression,
     cross_validate_model,
 )
+from .adaptive_model import (
+    AdaptiveGazeModel,
+    get_base_prior_weights,
+    get_default_lambda_diag,
+    FEATURE_DIM,
+)
 from .evaluator import (
     CalibrationEvaluator,
     CalibrationValidationReport,
@@ -47,6 +53,7 @@ __all__ = [
     "AffineGazeModel",
     "PolynomialGazeModel",
     "PhysicallyInformedGazeModel",
+    "AdaptiveGazeModel",
     "solve_ridge_regression",
     "cross_validate_model",
     "CalibrationEvaluator",

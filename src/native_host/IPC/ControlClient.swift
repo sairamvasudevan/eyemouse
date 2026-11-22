@@ -90,6 +90,32 @@ public final class ControlClient {
         return sendMessage(msg)
     }
     
+    public func sendAdaptPoint(features: [Double], targetNormX: Double, targetNormY: Double, weight: Double = 1.0) -> Bool {
+        guard isConnected else { return false }
+        let msg: [String: Any] = [
+            "cmd": "ADAPT_POINT",
+            "features": features,
+            "target_norm_x": targetNormX,
+            "target_norm_y": targetNormY,
+            "weight": weight
+        ]
+        return sendMessage(msg)
+    }
+    
+    public func sendResetAdaptation() -> Bool {
+        guard isConnected else { return false }
+        return sendMessage(["cmd": "RESET_ADAPTATION"])
+    }
+    
+    public func sendLoadCalibration(profilePath: String) -> Bool {
+        guard isConnected else { return false }
+        let msg: [String: Any] = [
+            "cmd": "LOAD_CALIBRATION",
+            "profile_path": profilePath
+        ]
+        return sendMessage(msg)
+    }
+    
     public func sendShutdown() {
         guard isConnected else { return }
         _ = sendMessage(["cmd": "SHUTDOWN"])
@@ -166,9 +192,20 @@ public final class ControlClient {
         } else if status == "ACK" {
             DiagnosticsStore.shared.updateEngineTelemetry(data: dict)
             onTelemetryReceived?(dict)
-        } else if status == "ERROR" {
-            let msg = dict["message"] as? String ?? "Unknown engine error"
-            print("[ControlClient] Engine reported error: \(msg)")
+        } else if status == "POINT_ADAPTED" {
+            let px = dict["pred_x"] as? Double ?? 0.0
+            let py = dict["pred_y"] as? Double ?? 0.0
+            print("[ControlClient] Engine adapted point, predicted: (\(px), \(py))")
+            DiagnosticsStore.shared.loadActiveProfile()
+        } else if status == "ADAPTATION_RESET" {
+            print("[ControlClient] Engine adaptation reset to base prior.")
+            DiagnosticsStore.shared.loadActiveProfile()
+        } else if status == "CALIBRATION_LOADED" {
+            print("[ControlClient] Engine loaded calibration profile.")
+            DiagnosticsStore.shared.loadActiveProfile()
+        } else if status == "ERROR" || status == "ADAPTATION_ERROR" || status == "CALIBRATION_ERROR" {
+            let msg = (dict["message"] as? String) ?? (dict["error"] as? String) ?? "Unknown engine error"
+            print("[ControlClient] Engine error: \(msg)")
         }
     }
 }
