@@ -113,6 +113,24 @@ class VisionPipeline:
         except Exception:
             pass
 
+    def load_trained_weights(self, weights: np.ndarray) -> None:
+        """Apply trained multi-user weights to the active gaze estimator."""
+        from .calibration.adaptive_model import AdaptiveGazeModel
+        from .calibration.estimator import CalibratedGazeEstimator
+        from .calibration.profile import DEFAULT_PROFILE_DIR, DEFAULT_PROFILE_NAME
+
+        if not isinstance(self.gaze_estimator, CalibratedGazeEstimator) or not isinstance(self.gaze_estimator.model, AdaptiveGazeModel):
+            adaptive_model = AdaptiveGazeModel(weights=np.array(weights, dtype=np.float64))
+            self.gaze_estimator = CalibratedGazeEstimator(model=adaptive_model)
+        else:
+            self.gaze_estimator.model.weights = np.array(weights, dtype=np.float64)
+
+        try:
+            profile_path = DEFAULT_PROFILE_DIR / DEFAULT_PROFILE_NAME
+            self.save_active_profile(profile_path)
+        except Exception:
+            pass
+
     def save_active_profile(self, filepath: Optional[Path] = None) -> Path:
         """Persist current active gaze model to calibration profile JSON."""
         from datetime import datetime, timezone

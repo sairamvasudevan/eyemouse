@@ -20,6 +20,14 @@ dist_smoke/
 # Third-party research clones (contain nested .git repos)
 research/
 
+# Local certs and collected training ground data
+certs/
+data/training_ground/*.jsonl
+data/training_ground/sessions/*.json
+!data/training_ground/.gitkeep
+models/*.json
+!models/.gitkeep
+
 # macOS and IDE files
 .DS_Store
 .vscode/

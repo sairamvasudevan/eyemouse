@@ -49,35 +49,39 @@ def get_base_prior_weights() -> np.ndarray:
     11: avg_x * avg_y (cross-axis interaction)
     """
     W0 = np.zeros((12, 2), dtype=np.float64)
-    # Output u (horizontal [0, 1])
+    # Output u (horizontal [0, 1]) in mirrored selfie view:
+    # Looking right: iris moves to image-right (avg_x > 0) -> positive u increment
+    # Turned right: nose moves to image-right (yaw < 0) -> positive u increment
     W0[0, 0] = 0.50       # Screen center intercept
-    W0[1, 0] = 3.20       # Eye movement horizontal sensitivity
-    W0[4, 0] = -0.40      # Head yaw contribution (left turn -> negative u shift)
-    W0[9, 0] = -0.15      # Head-eye coupling
+    W0[1, 0] = 3.60       # Eye movement horizontal sensitivity
+    W0[4, 0] = -0.35      # Head yaw contribution
+    W0[9, 0] = -0.10      # Head-eye coupling
 
-    # Output v (vertical [0, 1])
+    # Output v (vertical [0, 1]):
+    # Looking up: iris moves up (avg_y < 0) -> negative v shift towards 0.0
+    # Head up: nose points up (pitch > 0) -> negative v shift towards 0.0
     W0[0, 1] = 0.50       # Screen center intercept
-    W0[2, 1] = 5.00       # Eye movement vertical sensitivity
-    W0[5, 1] = -0.50      # Head pitch contribution (upward pitch -> negative v shift)
-    W0[8, 1] = 0.30       # Downward foreshortening curvature
-    W0[10, 1] = -0.15     # Head-eye pitch coupling
+    W0[2, 1] = 4.80       # Eye movement vertical sensitivity
+    W0[5, 1] = -0.40      # Head pitch contribution
+    W0[8, 1] = 0.20       # Downward foreshortening curvature
+    W0[10, 1] = -0.10     # Head-eye pitch coupling
     return W0
 
 
 def get_default_lambda_diag() -> np.ndarray:
     """Prior regularization strength per parameter.
     
-    Small lambda_0 (0.01) allows instant 1-point bias anchoring.
-    Moderate linear lambda (3.0 - 5.0) allows smooth scale adaptation.
+    Small lambda_0 (0.002) allows instant 1-point bias anchoring.
+    Moderate linear lambda (1.5 - 2.0) allows smooth scale adaptation.
     Stronger higher-order lambda (20.0 - 25.0) prevents wild polynomial bending.
     """
     return np.array([
-        0.01,  # 0: bias (very flexible for instant center calibration)
-        3.0,   # 1: avg_x scale
-        3.0,   # 2: avg_y scale
+        0.002, # 0: bias (very flexible for instant center calibration)
+        1.5,   # 1: avg_x scale
+        1.5,   # 2: avg_y scale
         10.0,  # 3: disp_x
-        5.0,   # 4: yaw scale
-        5.0,   # 5: pitch scale
+        4.0,   # 4: yaw scale
+        4.0,   # 5: pitch scale
         20.0,  # 6: roll
         25.0,  # 7: avg_x^2
         25.0,  # 8: avg_y^2
@@ -283,3 +287,112 @@ class AdaptiveGazeModel(BaseGazeModel):
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         return cls.from_dict(data)
+
+
+def train_global_ridge_model(
+    samples_path: Path,
+    alpha: float = 2.0,
+    output_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Train global Ridge regression gaze model on multi-user crowdsourced samples.
+    
+    Reads samples.jsonl, extracts (features, target), computes design matrix Phi,
+    and fits Ridge regression regularized toward physiological base prior W0:
+        W = (Phi^T Phi + alpha * Lambda)^(-1) (Phi^T Y + alpha * Lambda @ W0)
+        
+    Args:
+        samples_path: Path to dataset JSONL file.
+        alpha: Regularization scale parameter.
+        output_path: Optional path to persist the trained model weights.
+        
+    Returns:
+        Dictionary of training results, participant counts, and error metrics.
+    """
+    samples_path = Path(samples_path)
+    if not samples_path.exists():
+        return {
+            "success": False,
+            "error": f"Dataset file not found at {samples_path}",
+            "sample_count": 0,
+        }
+
+    records: List[Dict[str, Any]] = []
+    with open(samples_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except Exception:
+                continue
+
+    if len(records) < 2:
+        return {
+            "success": False,
+            "error": f"Insufficient samples for training ({len(records)} found, minimum 2 required).",
+            "sample_count": len(records),
+        }
+
+    X_list: List[List[float]] = []
+    Y_list: List[List[float]] = []
+    participants: set[str] = set()
+
+    for r in records:
+        feat = r.get("features")
+        tgt = r.get("target", {})
+        tx = tgt.get("norm_x") if isinstance(tgt, dict) else None
+        ty = tgt.get("norm_y") if isinstance(tgt, dict) else None
+        user = r.get("user_name", "Anonymous")
+
+        if feat is None or tx is None or ty is None:
+            continue
+        if len(feat) < 7:
+            continue
+
+        X_list.append([float(x) for x in feat[:7]])
+        Y_list.append([float(tx), float(ty)])
+        participants.add(str(user))
+
+    N = len(X_list)
+    if N < 2:
+        return {
+            "success": False,
+            "error": "No valid complete samples found in dataset.",
+            "sample_count": 0,
+        }
+
+    X = np.array(X_list, dtype=np.float64)
+    Y = np.array(Y_list, dtype=np.float64)
+
+    model = AdaptiveGazeModel()
+    prior_preds = model.predict(X)
+    prior_rmse = float(np.sqrt(np.mean((prior_preds - Y)**2)))
+
+    # Fit Ridge MAP model regularized toward W0
+    model.fit(X, Y, alpha=alpha)
+    fitted_preds = model.predict(X)
+    fitted_rmse = float(np.sqrt(np.mean((fitted_preds - Y)**2)))
+
+    diag_1080p = 2202.9  # sqrt(1920^2 + 1080^2)
+    prior_px = prior_rmse * diag_1080p
+    fitted_px = fitted_rmse * diag_1080p
+    improvement = max(0.0, (prior_rmse - fitted_rmse) / (prior_rmse + 1e-9) * 100.0)
+
+    if output_path is not None:
+        out_p = Path(output_path)
+        model.save_to_file(out_p)
+
+    return {
+        "success": True,
+        "sample_count": N,
+        "unique_participants": len(participants),
+        "participants": sorted(list(participants)),
+        "prior_rmse_norm": round(prior_rmse, 4),
+        "fitted_rmse_norm": round(fitted_rmse, 4),
+        "prior_pixel_error_1080p": round(prior_px, 1),
+        "fitted_pixel_error_1080p": round(fitted_px, 1),
+        "improvement_percent": round(improvement, 1),
+        "weights": model.weights.tolist(),
+    }
+
